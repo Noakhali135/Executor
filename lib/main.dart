@@ -100,122 +100,25 @@ class _MainShellScreenState extends State<MainShellScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF070B14),
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(54),
-        child: Container(
-          padding: EdgeInsets.only(
-            top: MediaQuery.of(context).padding.top + 4,
-            left: 14,
-            right: 14,
-            bottom: 8,
-          ),
-          decoration: const BoxDecoration(
-            color: Color(0xFF0B0F19),
-            border: Border(
-              bottom: BorderSide(color: Color(0xFF1E293B)),
+      body: SafeArea(
+        child: IndexedStack(
+          index: _selectedTab,
+          children: [
+            RunnerScreen(
+              workingDir: _workingDir,
+              onDirectoryChanged: _onDirectoryChanged,
+              codeController: _codeController,
+              onExecutionCompleted: _onExecutionCompleted,
             ),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 32,
-                    height: 32,
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFF6366F1), Color(0xFF4F46E5)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-                      borderRadius: BorderRadius.circular(8),
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFF6366F1).withOpacity(0.35),
-                          blurRadius: 6,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: const Center(
-                      child: Text(
-                        '</>',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13.5,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  const Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'DevRunner Mobile',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15,
-                        ),
-                      ),
-                      Text(
-                        'CLI & Workspace Environment',
-                        style: TextStyle(
-                          color: Color(0xFF94A3B8),
-                          fontSize: 10.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF064E3B).withOpacity(0.4),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: const Color(0xFF059669)),
-                ),
-                child: const Row(
-                  children: [
-                    Icon(Icons.circle, size: 7, color: Color(0xFF10B981)),
-                    SizedBox(width: 5),
-                    Text(
-                      'Ready',
-                      style: TextStyle(
-                        color: Color(0xFF34D399),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
+            ExplorerScreen(
+              key: _explorerKey,
+              workingDir: _workingDir,
+              onFileSelected: _onFileSelectedFromExplorer,
+              onBatchExportLoaded: _onBatchExportLoaded,
+              onRefreshRequested: () {},
+            ),
+          ],
         ),
-      ),
-      body: IndexedStack(
-        index: _selectedTab,
-        children: [
-          RunnerScreen(
-            workingDir: _workingDir,
-            onDirectoryChanged: _onDirectoryChanged,
-            codeController: _codeController,
-            onExecutionCompleted: _onExecutionCompleted,
-          ),
-          ExplorerScreen(
-            key: _explorerKey,
-            workingDir: _workingDir,
-            onFileSelected: _onFileSelectedFromExplorer,
-            onBatchExportLoaded: _onBatchExportLoaded,
-            onRefreshRequested: () {},
-          ),
-        ],
       ),
       bottomNavigationBar: Container(
         height: 54,
