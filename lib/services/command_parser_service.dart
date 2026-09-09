@@ -14,6 +14,21 @@ class ParseResult {
 }
 
 class CommandParserService {
+  static final String _tagAction = '[' + 'ACTION]:';
+  static final String _tagPath = '[' + 'PATH]:';
+  static final String _tagName = '[' + 'NAME]:';
+  static final String _tagContent = '[' + 'CONTENT]:';
+
+  static String _stripFences(String input) {
+    final bt = String.fromCharCode(96);
+    final fencePattern = RegExp(bt + r'{3,4}(?:text)?\s*([\s\S]*?)' + bt + r'{3,4}');
+    final matches = fencePattern.allMatches(input);
+    if (matches.isNotEmpty) {
+      return matches.map((m) => m.group(1) ?? '').join('\n\n');
+    }
+    return input;
+  }
+
   static ParseResult parse(String rawInput) {
     final actions = <CommandAction>[];
     final errors = <String>[];
@@ -22,28 +37,9 @@ class CommandParserService {
       return const ParseResult(actions: [], errors: ['Input text is empty']);
     }
 
-    String cleaned = rawInput;
-    if (cleaned.contains('````text')) {
-      final regex = RegExp(r'````text\s*([\s\S]*?)````');
-      final matches = regex.allMatches(cleaned);
-      if (matches.isNotEmpty) {
-        cleaned = matches.map((m) => m.group(1) ?? '').join('\n\n');
-      }
-    } else if (cleaned.contains('````')) {
-      final regex = RegExp(r'````\s*([\s\S]*?)````');
-      final matches = regex.allMatches(cleaned);
-      if (matches.isNotEmpty) {
-        cleaned = matches.map((m) => m.group(1) ?? '').join('\n\n');
-      }
-    } else if (cleaned.contains('```')) {
-      final regex = RegExp(r'```(?:text)?\s*([\s\S]*?)```');
-      final matches = regex.allMatches(cleaned);
-      if (matches.isNotEmpty) {
-        cleaned = matches.map((m) => m.group(1) ?? '').join('\n\n');
-      }
-    }
-
+    final cleaned = _stripFences(rawInput);
     final lines = cleaned.split('\n');
+
     ActionType? currentType;
     String? currentPath;
     String? currentName;
@@ -53,9 +49,9 @@ class CommandParserService {
     void flushAction() {
       if (currentType != null) {
         if (currentPath == null || currentPath!.trim().isEmpty) {
-          errors.add('Missing [PATH] for action $currentType');
+          errors.add('Missing path parameter for action ${currentType!.name}');
         } else if (currentName == null || currentName!.trim().isEmpty) {
-          errors.add('Missing [NAME] for action $currentType');
+          errors.add('Missing name parameter for action ${currentType!.name}');
         } else {
           String normalizedPath = currentPath!.trim();
           if (!normalizedPath.startsWith('/')) {
@@ -86,4 +82,50 @@ class CommandParserService {
       final line = lines[i];
       final trimmed = line.trim();
 
-      if (trimmed.startsWith('
+      if (trimmed.startsWith(_tagAction)) {
+        flushAction();
+        final val = trimmed.substring(_tagAction.length).trim().toUpperCase();
+        switch (val) {
+          case 'CREATE_FILE':
+            currentType = ActionType.createFile;
+            break;
+          case 'DELETE_FILE':
+            currentType = ActionType.deleteFile;
+            break;
+          case 'CREATE_FOLDER':
+            currentType = ActionType.createFolder;
+            break;
+          case 'DELETE_FOLDER':
+            currentType = ActionType.deleteFolder;
+            break;
+          default:
+            errors.add('Unknown action type: $val on line ${i + 1}');
+        }
+        continue;
+      }
+
+      if (!readingContent && trimmed.startsWith(_tagPath)) {
+        currentPath = trimmed.substring(_tagPath.length).trim();
+        continue;
+      }
+
+      if (!readingContent && trimmed.startsWith(_tagName)) {
+        currentName = trimmed.substring(_tagName.length).trim();
+        continue;
+      }
+
+      if (!readingContent && trimmed.startsWith(_tagContent)) {
+        readingContent = true;
+        continue;
+      }
+
+      if (readingContent) {
+        contentBuffer.writeln(line);
+      }
+    }
+
+    flushAction();
+
+    return ParseResult(actions: actions, errors: errors);
+  }
+}

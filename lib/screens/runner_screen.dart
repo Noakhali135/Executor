@@ -199,7 +199,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
     }
 
     if (!parseResult.hasActions) {
-      _addLog('No valid [ACTION] commands found in the input.', LogLevel.warning);
+      _addLog('No valid commands found to execute.', LogLevel.warning);
       setState(() {
         _isExecuting = false;
       });
@@ -392,7 +392,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
                     ),
                     const SizedBox(width: 8),
                     const Text(
-                      'batch_commands.txt',
+                      'main.py',
                       style: TextStyle(
                         color: Color(0xFFE2E8F0),
                         fontFamily: 'monospace',
@@ -440,4 +440,235 @@ class _RunnerScreenState extends State<RunnerScreen> {
                 isDense: true,
                 contentPadding: EdgeInsets.zero,
                 border: InputBorder.none,
-                hintText: '// Type or paste your code/commands here...\n// Supports 
+                hintText: '// Type or paste your code/commands here...',
+                hintStyle: TextStyle(
+                  color: Color(0xFF475569),
+                  fontFamily: 'monospace',
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ),
+          const Divider(height: 1, color: Color(0xFF1E293B)),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Lines: $_lineCount | Chars: $_charCount',
+                  style: const TextStyle(
+                    color: Color(0xFF64748B),
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                  ),
+                ),
+                const Text(
+                  'Python 3.11',
+                  style: TextStyle(
+                    color: Color(0xFF818CF8),
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPillButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    Color? iconColor,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E293B),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: iconColor ?? const Color(0xFF94A3B8)),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Color(0xFFE2E8F0),
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildExecuteButton() {
+    return SizedBox(
+      height: 52,
+      child: ElevatedButton(
+        onPressed: _isExecuting ? null : _executeScript,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFF10B981),
+          disabledBackgroundColor: const Color(0xFF065F46),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          elevation: 4,
+          shadowColor: const Color(0xFF10B981).withOpacity(0.4),
+        ),
+        child: _isExecuting
+            ? const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  ),
+                  SizedBox(width: 12),
+                  Text(
+                    'EXECUTING SCRIPT...',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.0,
+                    ),
+                  ),
+                ],
+              )
+            : const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.play_arrow_rounded, color: Colors.white, size: 22),
+                  SizedBox(width: 6),
+                  Text(
+                    'EXECUTE SCRIPT',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.0,
+                    ),
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _buildTerminalCard() {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF0B101D),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF1E293B)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Row(
+                  children: [
+                    Icon(Icons.terminal_rounded, size: 16, color: Color(0xFF38BDF8)),
+                    SizedBox(width: 8),
+                    Text(
+                      'EXECUTION OUTPUT',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        letterSpacing: 0.8,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                InkWell(
+                  onTap: () {
+                    setState(() {
+                      _terminalLogs.clear();
+                    });
+                  },
+                  borderRadius: BorderRadius.circular(6),
+                  child: const Padding(
+                    padding: EdgeInsets.all(4.0),
+                    child: Icon(Icons.block_rounded, size: 16, color: Color(0xFF64748B)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1, color: Color(0xFF1E293B)),
+          Container(
+            height: 170,
+            color: const Color(0xFF050811),
+            padding: const EdgeInsets.all(12),
+            child: _terminalLogs.isEmpty
+                ? const Align(
+                    alignment: Alignment.topLeft,
+                    child: Text(
+                      '// Terminal ready. Click \'EXECUTE SCRIPT\' to view logs.',
+                      style: TextStyle(
+                        color: Color(0xFF475569),
+                        fontFamily: 'monospace',
+                        fontStyle: FontStyle.italic,
+                        fontSize: 12.5,
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    controller: _terminalScrollController,
+                    itemCount: _terminalLogs.length,
+                    itemBuilder: (ctx, i) {
+                      final log = _terminalLogs[i];
+                      Color textColor;
+                      switch (log.level) {
+                        case LogLevel.success:
+                          textColor = const Color(0xFF34D399);
+                          break;
+                        case LogLevel.error:
+                          textColor = const Color(0xFFF87171);
+                          break;
+                        case LogLevel.warning:
+                          textColor = const Color(0xFFFBBF24);
+                          break;
+                        case LogLevel.info:
+                        default:
+                          textColor = const Color(0xFF94A3B8);
+                      }
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2.0),
+                        child: Text(
+                          '[${log.formattedTime}] ${log.message}',
+                          style: TextStyle(
+                            color: textColor,
+                            fontFamily: 'monospace',
+                            fontSize: 12,
+                            height: 1.35,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}

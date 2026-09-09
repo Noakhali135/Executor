@@ -21,14 +21,14 @@ class FileExecutionService {
     if (!await baseDir.exists()) {
       try {
         await baseDir.create(recursive: true);
-        emit('Working directory did not exist. Created: $rootDir', LogLevel.warning);
+        emit('Working directory created: $rootDir', LogLevel.warning);
       } catch (e) {
-        emit('Unable to access or create working directory: $e', LogLevel.error);
+        emit('Unable to access working directory: $e', LogLevel.error);
         return logs;
       }
     }
 
-    emit('Beginning execution of ${actions.length} batch action(s)...', LogLevel.info);
+    emit('Executing ${actions.length} action(s)...', LogLevel.info);
     int successCount = 0;
     int failCount = 0;
 
