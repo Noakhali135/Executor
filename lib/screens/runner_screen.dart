@@ -94,6 +94,36 @@ class _RunnerScreenState extends State<RunnerScreen> {
     _updateTextMetrics();
   }
 
+  Future<void> _handleCopyLogs() async {
+    if (_terminalLogs.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No terminal logs to copy'),
+          duration: Duration(milliseconds: 800),
+          backgroundColor: Color(0xFF1E293B),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    final rawLogs = _terminalLogs
+        .map((l) => '[${l.formattedTime}] ${l.message}')
+        .join('\n');
+    await Clipboard.setData(ClipboardData(text: rawLogs));
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Output logs copied to clipboard'),
+          duration: Duration(milliseconds: 1000),
+          backgroundColor: Color(0xFF10B981),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
   void _addLog(String msg, LogLevel level) {
     setState(() {
       _terminalLogs.add(TerminalLog(message: msg, level: level));
@@ -532,17 +562,30 @@ class _RunnerScreenState extends State<RunnerScreen> {
                     ),
                   ],
                 ),
-                InkWell(
-                  onTap: () {
-                    setState(() {
-                      _terminalLogs.clear();
-                    });
-                  },
-                  borderRadius: BorderRadius.circular(6),
-                  child: const Padding(
-                    padding: EdgeInsets.all(3.0),
-                    child: Icon(Icons.block_rounded, size: 15, color: Color(0xFF64748B)),
-                  ),
+                Row(
+                  children: [
+                    InkWell(
+                      onTap: _handleCopyLogs,
+                      borderRadius: BorderRadius.circular(6),
+                      child: const Padding(
+                        padding: EdgeInsets.all(3.0),
+                        child: Icon(Icons.content_copy_rounded, size: 15, color: Color(0xFF94A3B8)),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    InkWell(
+                      onTap: () {
+                        setState(() {
+                          _terminalLogs.clear();
+                        });
+                      },
+                      borderRadius: BorderRadius.circular(6),
+                      child: const Padding(
+                        padding: EdgeInsets.all(3.0),
+                        child: Icon(Icons.block_rounded, size: 15, color: Color(0xFF64748B)),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),

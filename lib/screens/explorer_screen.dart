@@ -1,17 +1,21 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import '../models/tree_node.dart';
+import '../services/export_service.dart';
 
 class ExplorerScreen extends StatefulWidget {
   final String workingDir;
   final Function(String relativePath, String content) onFileSelected;
+  final Function(String exportContent)? onBatchExportLoaded;
   final VoidCallback onRefreshRequested;
 
   const ExplorerScreen({
     super.key,
     required this.workingDir,
     required this.onFileSelected,
+    this.onBatchExportLoaded,
     required this.onRefreshRequested,
   });
 
@@ -24,6 +28,9 @@ class ExplorerScreenState extends State<ExplorerScreen> {
   List<TreeNode> _rootNodes = [];
   bool _isLoading = false;
   String _filterQuery = '';
+
+  bool _isSelectionMode = false;
+  final Set<String> _selectedPaths = <String>{};
 
   @override
   void initState() {
@@ -40,6 +47,8 @@ class ExplorerScreenState extends State<ExplorerScreen> {
   void didUpdateWidget(covariant ExplorerScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.workingDir != widget.workingDir) {
+      _selectedPaths.clear();
+      _isSelectionMode = false;
       _loadDirectoryTree();
     }
   }
@@ -176,6 +185,190 @@ class ExplorerScreenState extends State<ExplorerScreen> {
     });
   }
 
+  Future<void> _toggleNodeSelection(TreeNode node) async {
+    final isSelected = _selectedPaths.contains(node.fullPath);
+    setState(() {
+      _isSelectionMode = true;
+    });
+
+    if (isSelected) {
+      _deselectRecursively(node.fullPath);
+    } else {
+      await _selectRecursively(node.fullPath, node.isDirectory);
+    }
+
+    if (_selectedPaths.isEmpty) {
+      setState(() {
+        _isSelectionMode = false;
+      });
+    }
+  }
+
+  Future<void> _selectRecursively(String targetPath, bool isDir) async {
+    final normTarget = p.normalize(targetPath);
+    _selectedPaths.add(normTarget);
+
+    if (isDir) {
+      try {
+        final d = Directory(normTarget);
+        if (await d.exists()) {
+          final subEntities = await d.list(recursive: true, followLinks: false).toList();
+          for (final entity in subEntities) {
+            final name = p.basename(entity.path);
+            if (!name.startsWith('.')) {
+              _selectedPaths.add(p.normalize(entity.path));
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (mounted) setState(() {});
+  }
+
+  void _deselectRecursively(String targetPath) {
+    final normTarget = p.normalize(targetPath);
+    _selectedPaths.remove(normTarget);
+
+    final prefix = normTarget.endsWith(p.separator) ? normTarget : '$normTarget${p.separator}';
+    _selectedPaths.removeWhere((item) => item.startsWith(prefix));
+
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _selectAll() async {
+    setState(() {
+      _isSelectionMode = true;
+    });
+    for (final node in _rootNodes) {
+      await _selectRecursively(node.fullPath, node.isDirectory);
+    }
+  }
+
+  void _clearSelection() {
+    setState(() {
+      _selectedPaths.clear();
+      _isSelectionMode = false;
+    });
+  }
+
+  Future<void> _exportSelected() async {
+    if (_selectedPaths.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No files or folders selected to export'),
+          backgroundColor: Color(0xFF1E293B),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: CircularProgressIndicator(color: Color(0xFF818CF8)),
+      ),
+    );
+
+    final exportText = await ExportService.generateBatchExport(
+      rootDir: widget.workingDir,
+      selectedPaths: _selectedPaths,
+    );
+
+    if (mounted) Navigator.pop(context);
+
+    if (!mounted) return;
+    _showExportResultDialog(exportText);
+  }
+
+  void _showExportResultDialog(String exportText) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0F1523),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: const BorderSide(color: Color(0xFF1E293B)),
+        ),
+        title: const Row(
+          children: [
+            Icon(Icons.ios_share_rounded, color: Color(0xFF34D399), size: 18),
+            SizedBox(width: 8),
+            Text(
+              'Batch Export Preview',
+              style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 250,
+          child: Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF070B14),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFF1E293B)),
+            ),
+            child: SingleChildScrollView(
+              physics: const BouncingScrollPhysics(),
+              child: SelectableText(
+                exportText.isEmpty ? '// No files found to export' : exportText,
+                style: const TextStyle(
+                  color: Color(0xFFCBD5E1),
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  height: 1.35,
+                ),
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close', style: TextStyle(color: Color(0xFF94A3B8))),
+          ),
+          if (widget.onBatchExportLoaded != null)
+            TextButton.icon(
+              onPressed: () {
+                Navigator.pop(ctx);
+                widget.onBatchExportLoaded!(exportText);
+                _clearSelection();
+              },
+              icon: const Icon(Icons.send_rounded, size: 14),
+              label: const Text('Load into Runner'),
+              style: TextButton.styleFrom(foregroundColor: const Color(0xFF818CF8)),
+            ),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF10B981),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: exportText));
+              if (ctx.mounted) Navigator.pop(ctx);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Batch export copied to clipboard!'),
+                    backgroundColor: Color(0xFF10B981),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+              _clearSelection();
+            },
+            icon: const Icon(Icons.copy_rounded, size: 15, color: Colors.white),
+            label: const Text('Copy Text', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
   List<TreeNode> _flattenVisibleNodes(List<TreeNode> nodes) {
     final result = <TreeNode>[];
 
@@ -209,6 +402,11 @@ class ExplorerScreenState extends State<ExplorerScreen> {
   }
 
   Future<void> _handleFileTap(TreeNode node) async {
+    if (_isSelectionMode) {
+      await _toggleNodeSelection(node);
+      return;
+    }
+
     if (node.isDirectory) {
       await _toggleFolder(node);
       return;
@@ -369,51 +567,102 @@ class ExplorerScreenState extends State<ExplorerScreen> {
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: const Color(0xFF1E293B)),
             ),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Column(
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.account_tree_outlined, size: 16, color: Color(0xFF818CF8)),
-                        SizedBox(width: 6),
-                        Text(
-                          'FILE EXPLORER',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            letterSpacing: 0.8,
-                            fontWeight: FontWeight.bold,
+                if (_isSelectionMode)
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
+                        children: [
+                          InkWell(
+                            onTap: _clearSelection,
+                            child: const Padding(
+                              padding: EdgeInsets.all(4.0),
+                              child: Icon(Icons.close_rounded, size: 18, color: Color(0xFF94A3B8)),
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-                    Row(
-                      children: [
-                        _buildSmallIconButton(
-                          icon: Icons.unfold_more,
-                          tooltip: 'Expand All',
-                          onTap: _expandAll,
-                        ),
-                        const SizedBox(width: 5),
-                        _buildSmallIconButton(
-                          icon: Icons.unfold_less,
-                          tooltip: 'Collapse All',
-                          onTap: _collapseAll,
-                        ),
-                        const SizedBox(width: 5),
-                        _buildSmallIconButton(
-                          icon: Icons.add,
-                          tooltip: 'Add File/Folder',
-                          onTap: _showCreateDialog,
-                          isPrimary: true,
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+                          const SizedBox(width: 6),
+                          Text(
+                            '${_selectedPaths.length} selected',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          TextButton(
+                            onPressed: _selectAll,
+                            style: TextButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                            ),
+                            child: const Text('All', style: TextStyle(color: Color(0xFF818CF8), fontSize: 12)),
+                          ),
+                          const SizedBox(width: 4),
+                          ElevatedButton.icon(
+                            onPressed: _exportSelected,
+                            icon: const Icon(Icons.ios_share_rounded, size: 13, color: Colors.white),
+                            label: const Text('Export', style: TextStyle(color: Colors.white, fontSize: 11.5, fontWeight: FontWeight.bold)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF6366F1),
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  )
+                else
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.account_tree_outlined, size: 16, color: Color(0xFF818CF8)),
+                          SizedBox(width: 6),
+                          Text(
+                            'FILE EXPLORER',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              letterSpacing: 0.8,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          _buildSmallIconButton(
+                            icon: Icons.unfold_more,
+                            tooltip: 'Expand All',
+                            onTap: _expandAll,
+                          ),
+                          const SizedBox(width: 5),
+                          _buildSmallIconButton(
+                            icon: Icons.unfold_less,
+                            tooltip: 'Collapse All',
+                            onTap: _collapseAll,
+                          ),
+                          const SizedBox(width: 5),
+                          _buildSmallIconButton(
+                            icon: Icons.add,
+                            tooltip: 'Add File/Folder',
+                            onTap: _showCreateDialog,
+                            isPrimary: true,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 const SizedBox(height: 8),
                 Container(
                   height: 36,
@@ -517,14 +766,16 @@ class ExplorerScreenState extends State<ExplorerScreen> {
               borderRadius: BorderRadius.circular(10),
               border: Border.all(color: const Color(0xFF312E81)),
             ),
-            child: const Row(
+            child: Row(
               children: [
-                Icon(Icons.info_outline_rounded, size: 15, color: Color(0xFF818CF8)),
-                SizedBox(width: 8),
+                const Icon(Icons.info_outline_rounded, size: 15, color: Color(0xFF818CF8)),
+                const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'Tap any file in the tree to load its content directly into the code editor!',
-                    style: TextStyle(
+                    _isSelectionMode
+                        ? 'Select files/folders and tap "Export" to generate batch script.'
+                        : 'Long press any item to select and export as batch script!',
+                    style: const TextStyle(
                       color: Color(0xFFC7D2FE),
                       fontSize: 11.5,
                     ),
@@ -540,10 +791,13 @@ class ExplorerScreenState extends State<ExplorerScreen> {
 
   Widget _buildTreeItemRow(TreeNode node) {
     const double indentSize = 16.0;
+    final isSelected = _selectedPaths.contains(node.fullPath);
 
     return InkWell(
       onTap: () => _handleFileTap(node),
+      onLongPress: () => _toggleNodeSelection(node),
       child: Container(
+        color: isSelected ? const Color(0xFF6366F1).withOpacity(0.16) : Colors.transparent,
         padding: EdgeInsets.only(
           left: 10.0 + (node.depth * indentSize),
           right: 10.0,
@@ -552,7 +806,20 @@ class ExplorerScreenState extends State<ExplorerScreen> {
         ),
         child: Row(
           children: [
-            if (node.depth > 0)
+            if (_isSelectionMode) ...[
+              GestureDetector(
+                onTap: () => _toggleNodeSelection(node),
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 6.0),
+                  child: Icon(
+                    isSelected ? Icons.check_box_rounded : Icons.check_box_outline_blank_rounded,
+                    size: 16,
+                    color: isSelected ? const Color(0xFF818CF8) : const Color(0xFF475569),
+                  ),
+                ),
+              ),
+            ],
+            if (node.depth > 0 && !_isSelectionMode)
               Container(
                 width: 1,
                 height: 14,
@@ -560,14 +827,17 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                 margin: const EdgeInsets.only(right: 6),
               ),
             if (node.isDirectory)
-              Padding(
-                padding: const EdgeInsets.only(right: 4.0),
-                child: Icon(
-                  node.isExpanded
-                      ? Icons.keyboard_arrow_down_rounded
-                      : Icons.keyboard_arrow_right_rounded,
-                  size: 15,
-                  color: const Color(0xFF64748B),
+              GestureDetector(
+                onTap: () => _toggleFolder(node),
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 4.0),
+                  child: Icon(
+                    node.isExpanded
+                        ? Icons.keyboard_arrow_down_rounded
+                        : Icons.keyboard_arrow_right_rounded,
+                    size: 15,
+                    color: const Color(0xFF64748B),
+                  ),
                 ),
               )
             else
@@ -578,7 +848,9 @@ class ExplorerScreenState extends State<ExplorerScreen> {
               child: Text(
                 node.name,
                 style: TextStyle(
-                  color: node.isDirectory ? const Color(0xFFE2E8F0) : const Color(0xFFCBD5E1),
+                  color: isSelected
+                      ? Colors.white
+                      : (node.isDirectory ? const Color(0xFFE2E8F0) : const Color(0xFFCBD5E1)),
                   fontFamily: 'monospace',
                   fontSize: 12.5,
                   fontWeight: node.isDirectory ? FontWeight.w600 : FontWeight.normal,

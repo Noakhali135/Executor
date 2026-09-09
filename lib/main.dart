@@ -85,6 +85,13 @@ class _MainShellScreenState extends State<MainShellScreen> {
     });
   }
 
+  void _onBatchExportLoaded(String content) {
+    setState(() {
+      _codeController.text = content;
+      _selectedTab = 0;
+    });
+  }
+
   void _onExecutionCompleted() {
     _explorerKey.currentState?.refresh();
   }
@@ -205,6 +212,7 @@ class _MainShellScreenState extends State<MainShellScreen> {
             key: _explorerKey,
             workingDir: _workingDir,
             onFileSelected: _onFileSelectedFromExplorer,
+            onBatchExportLoaded: _onBatchExportLoaded,
             onRefreshRequested: () {},
           ),
         ],
