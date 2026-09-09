@@ -479,7 +479,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                 autofocus: true,
                 style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 12.5),
                 decoration: InputDecoration(
-                  hintText: isFolder ? 'folder_name' : 'index.php',
+                  hintText: isFolder ? 'folder_name' : 'index.html',
                   hintStyle: const TextStyle(color: Color(0xFF475569)),
                   filled: true,
                   fillColor: const Color(0xFF090D16),
@@ -533,8 +533,6 @@ class ExplorerScreenState extends State<ExplorerScreen> {
 
     final ext = node.extension;
     switch (ext) {
-      case 'php':
-        return const Icon(Icons.code_rounded, size: 16, color: Color(0xFFA855F7));
       case 'html':
       case 'htm':
         return const Icon(Icons.html_rounded, size: 16, color: Color(0xFFF97316));
@@ -782,7 +780,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                   child: Text(
                     _isSelectionMode
                         ? 'Select files/folders and tap "Export" to generate batch script.'
-                        : 'Tap any file to view, edit, or run PHP/HTML! Long-press to select.',
+                        : 'Tap any file to view, edit, or render HTML! Long-press to select.',
                     style: const TextStyle(
                       color: Color(0xFFC7D2FE),
                       fontSize: 11.5,

@@ -2,8 +2,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
-import 'package:webview_flutter/webview_flutter.dart';
-import '../services/php_service.dart';
 import 'html_preview_widget.dart';
 
 class FileEditorDialog extends StatefulWidget {
@@ -41,13 +39,6 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
   int _charCount = 0;
   int _fileSizeBytes = 0;
 
-  WebViewController? _phpWebViewController;
-  int? _phpServerPort;
-  bool _isPhpServerRunning = false;
-  String _phpStatusText = 'Smart Engine Active';
-  bool _hasNativePhp = false;
-  bool _isNativeServerMode = false;
-
   static const Set<String> _imageExtensions = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'};
   static const Set<String> _binaryExtensions = {
     'zip', 'apk', 'aab', 'tar', 'gz', 'rar', '7z', 'jar', 'exe',
@@ -60,171 +51,18 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
     return ext == '.html' || ext == '.htm';
   }
 
-  bool get _isPhp {
-    final ext = p.extension(widget.filePath).toLowerCase();
-    return ext == '.php';
-  }
-
   @override
   void initState() {
     super.initState();
     _loadFileContent();
     _codeController.addListener(_onTextChanged);
-    if (_isPhp) {
-      _initPhpEnvironment();
-    }
   }
 
   @override
   void dispose() {
     _codeController.removeListener(_onTextChanged);
     _codeController.dispose();
-    PhpService.stopPhpServer();
     super.dispose();
-  }
-
-  Future<void> _initPhpEnvironment() async {
-    final phpInfo = await PhpService.detectPhp();
-    if (mounted) {
-      setState(() {
-        _hasNativePhp = phpInfo.isAvailable;
-        _phpStatusText = phpInfo.isAvailable ? phpInfo.versionString : 'Smart GUI Engine';
-      });
-    }
-
-    _phpWebViewController = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(const Color(0xFF070B14));
-  }
-
-  Future<void> _launchPhpPreview() async {
-    if (_phpWebViewController == null) return;
-
-    if (_isNativeServerMode && _hasNativePhp) {
-      setState(() => _isPhpServerRunning = true);
-      final port = await PhpService.startPhpServer(docRoot: widget.workingDir);
-      if (port != null && mounted) {
-        setState(() {
-          _phpServerPort = port;
-          _isPhpServerRunning = false;
-        });
-        final relPath = p.relative(widget.filePath, from: widget.workingDir).replaceAll(r'\', '/');
-        final targetUrl = 'http://127.0.0.1:$port/$relPath';
-        await _phpWebViewController!.loadRequest(Uri.parse(targetUrl));
-        return;
-      }
-    }
-
-    final renderedHtml = PhpService.renderPhpFileToHtml(
-      phpCode: _codeController.text,
-      fileName: p.basename(widget.filePath),
-    );
-
-    await _phpWebViewController!.loadHtmlString(
-      renderedHtml,
-      baseUrl: 'https://acmeacademy.edu.bd/',
-    );
-  }
-
-  Future<void> _runPhpCli() async {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF0F1523),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-        side: BorderSide(color: Color(0xFF1E293B)),
-      ),
-      builder: (ctx) {
-        return FutureBuilder<PhpExecutionResult>(
-          future: PhpService.runCliScript(
-            scriptPath: widget.filePath,
-            workingDir: widget.workingDir,
-          ),
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const SizedBox(
-                height: 200,
-                child: Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CircularProgressIndicator(color: Color(0xFF818CF8), strokeWidth: 2),
-                      SizedBox(height: 12),
-                      Text('Executing PHP CLI...', style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13)),
-                    ],
-                  ),
-                ),
-              );
-            }
-
-            final res = snapshot.data;
-            final isSuccess = res?.isSuccess ?? false;
-            final outputText = (res?.stdout.isNotEmpty ?? false)
-                ? res!.stdout
-                : (res?.stderr.isNotEmpty ?? false)
-                    ? res!.stderr
-                    : '[Script finished with no output]';
-
-            return Container(
-              height: 320,
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(
-                            isSuccess ? Icons.check_circle_rounded : Icons.error_rounded,
-                            size: 16,
-                            color: isSuccess ? const Color(0xFF10B981) : const Color(0xFFF87171),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            'PHP CLI (Exit: ${res?.exitCode})',
-                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
-                          ),
-                        ],
-                      ),
-                      Text(
-                        '${res?.duration.inMilliseconds}ms',
-                        style: const TextStyle(color: Color(0xFF64748B), fontFamily: 'monospace', fontSize: 11),
-                      ),
-                    ],
-                  ),
-                  const Divider(color: Color(0xFF1E293B), height: 16),
-                  Expanded(
-                    child: Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF070B14),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: const Color(0xFF1E293B)),
-                      ),
-                      child: SingleChildScrollView(
-                        physics: const BouncingScrollPhysics(),
-                        child: SelectableText(
-                          outputText,
-                          style: TextStyle(
-                            color: isSuccess ? const Color(0xFFCBD5E1) : const Color(0xFFFCA5A5),
-                            fontFamily: 'monospace',
-                            fontSize: 12,
-                            height: 1.35,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          },
-        );
-      },
-    );
   }
 
   void _onTextChanged() {
@@ -391,9 +229,6 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
         );
       }
       widget.onSaved?.call();
-      if (_isPhp && _activeTab == 1) {
-        _launchPhpPreview();
-      }
     } catch (e) {
       if (mounted) {
         setState(() => _isSaving = false);
@@ -412,7 +247,6 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
 
   Widget _buildFileIcon() {
     final ext = p.extension(widget.filePath).toLowerCase();
-    if (ext == '.php') return const Icon(Icons.code_rounded, color: Color(0xFFA855F7), size: 20);
     if (ext == '.html' || ext == '.htm') return const Icon(Icons.html_rounded, color: Color(0xFFF97316), size: 20);
     if (ext == '.py') return const Icon(Icons.code_rounded, color: Color(0xFF38BDF8), size: 20);
     if (ext == '.dart') return const Icon(Icons.flutter_dash, color: Color(0xFF0284C7), size: 20);
@@ -421,89 +255,6 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
     if (ext == '.md') return const Icon(Icons.description_rounded, color: Color(0xFF60A5FA), size: 20);
     if (_isImage) return const Icon(Icons.image_rounded, color: Color(0xFF34D399), size: 20);
     return const Icon(Icons.insert_drive_file_outlined, color: Color(0xFF94A3B8), size: 20);
-  }
-
-  Widget _buildPhpPreview() {
-    final fileName = p.basename(widget.filePath);
-    final displayStatus = _isNativeServerMode
-        ? 'http://127.0.0.1:$_phpServerPort/$fileName'
-        : 'Smart GUI Render Engine';
-
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: const BoxDecoration(
-            color: Color(0xFF0F1523),
-            border: Border(bottom: BorderSide(color: Color(0xFF1E293B))),
-          ),
-          child: Row(
-            children: [
-              const Icon(Icons.auto_awesome_rounded, size: 15, color: Color(0xFFA855F7)),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF070B14),
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: const Color(0xFF1E293B)),
-                  ),
-                  child: Text(
-                    displayStatus,
-                    style: const TextStyle(
-                      color: Color(0xFF94A3B8),
-                      fontSize: 11,
-                      fontFamily: 'monospace',
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              if (_hasNativePhp)
-                InkWell(
-                  onTap: () {
-                    setState(() => _isNativeServerMode = !_isNativeServerMode);
-                    _launchPhpPreview();
-                  },
-                  borderRadius: BorderRadius.circular(6),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: _isNativeServerMode ? const Color(0xFF10B981).withOpacity(0.2) : const Color(0xFF1E293B),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: _isNativeServerMode ? const Color(0xFF10B981) : const Color(0xFF334155)),
-                    ),
-                    child: Text(
-                      _isNativeServerMode ? 'Server' : 'Template',
-                      style: TextStyle(
-                        color: _isNativeServerMode ? const Color(0xFF34D399) : const Color(0xFF94A3B8),
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
-              const SizedBox(width: 4),
-              InkWell(
-                onTap: _launchPhpPreview,
-                borderRadius: BorderRadius.circular(6),
-                child: const Padding(
-                  padding: EdgeInsets.all(5),
-                  child: Icon(Icons.refresh_rounded, size: 16, color: Color(0xFFCBD5E1)),
-                ),
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: _phpWebViewController != null
-              ? WebViewWidget(controller: _phpWebViewController!)
-              : const Center(child: CircularProgressIndicator(color: Color(0xFFA855F7), strokeWidth: 2)),
-        ),
-      ],
-    );
   }
 
   @override
@@ -565,16 +316,14 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
                           ],
                         ),
                         Text(
-                          _isPhp
-                              ? '$relPath • $_phpStatusText'
-                              : '$relPath  (${_formatSize(_fileSizeBytes)})',
+                          '$relPath  (${_formatSize(_fileSizeBytes)})',
                           style: const TextStyle(color: Color(0xFF64748B), fontSize: 10.5),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ],
                     ),
                   ),
-                  if (_isHtml || _isPhp)
+                  if (_isHtml)
                     Container(
                       margin: const EdgeInsets.only(right: 8),
                       height: 30,
@@ -601,21 +350,16 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
                             ),
                           ),
                           InkWell(
-                            onTap: () {
-                              setState(() => _activeTab = 1);
-                              if (_isPhp) {
-                                _launchPhpPreview();
-                              }
-                            },
+                            onTap: () => setState(() => _activeTab = 1),
                             borderRadius: const BorderRadius.horizontal(right: Radius.circular(8)),
                             child: Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                               color: _activeTab == 1 ? const Color(0xFF10B981) : Colors.transparent,
-                              child: Row(
+                              child: const Row(
                                 children: [
-                                  Icon(_isPhp ? Icons.auto_awesome_rounded : Icons.visibility_rounded, size: 13, color: Colors.white),
-                                  const SizedBox(width: 4),
-                                  Text(_isPhp ? 'Render GUI' : 'Render', style: const TextStyle(color: Colors.white, fontSize: 11)),
+                                  Icon(Icons.visibility_rounded, size: 13, color: Colors.white),
+                                  SizedBox(width: 4),
+                                  Text('Render', style: TextStyle(color: Colors.white, fontSize: 11)),
                                 ],
                               ),
                             ),
@@ -624,12 +368,6 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
                       ),
                     ),
                   if (!_isBinary && !_isImage) ...[
-                    if (_isPhp)
-                      IconButton(
-                        icon: const Icon(Icons.terminal_rounded, color: Color(0xFFA855F7), size: 19),
-                        tooltip: 'Run PHP CLI',
-                        onPressed: _runPhpCli,
-                      ),
                     if (widget.onSendToRunner != null)
                       IconButton(
                         icon: const Icon(Icons.send_to_mobile_rounded, color: Color(0xFF818CF8), size: 18),
@@ -694,33 +432,31 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
                                 ],
                               ),
                             )
-                          : _isPhp && _activeTab == 1
-                              ? _buildPhpPreview()
-                              : _isHtml && _activeTab == 1
-                                  ? HtmlPreviewWidget(
-                                      htmlContent: _codeController.text,
-                                      baseDir: p.dirname(widget.filePath),
-                                      fileName: fileName,
-                                    )
-                                  : Container(
-                                      color: const Color(0xFF070B14),
-                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                      child: TextField(
-                                        controller: _codeController,
-                                        maxLines: null,
-                                        expands: true,
-                                        style: const TextStyle(
-                                          color: Color(0xFFCBD5E1),
-                                          fontFamily: 'monospace',
-                                          fontSize: 12.5,
-                                          height: 1.42,
-                                        ),
-                                        decoration: const InputDecoration(
-                                          border: InputBorder.none,
-                                          contentPadding: EdgeInsets.zero,
-                                        ),
-                                      ),
+                          : _isHtml && _activeTab == 1
+                              ? HtmlPreviewWidget(
+                                  htmlContent: _codeController.text,
+                                  baseDir: p.dirname(widget.filePath),
+                                  fileName: fileName,
+                                )
+                              : Container(
+                                  color: const Color(0xFF070B14),
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                  child: TextField(
+                                    controller: _codeController,
+                                    maxLines: null,
+                                    expands: true,
+                                    style: const TextStyle(
+                                      color: Color(0xFFCBD5E1),
+                                      fontFamily: 'monospace',
+                                      fontSize: 12.5,
+                                      height: 1.42,
                                     ),
+                                    decoration: const InputDecoration(
+                                      border: InputBorder.none,
+                                      contentPadding: EdgeInsets.zero,
+                                    ),
+                                  ),
+                                ),
             ),
             if (!_isBinary && !_isImage)
               Container(
