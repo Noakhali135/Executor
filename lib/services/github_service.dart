@@ -77,7 +77,7 @@ class GitHubService {
       final res = await http.get(
         Uri.parse('$_baseUrl/user'),
         headers: _headers(token),
-      );
+      ).timeout(const Duration(seconds: 15));
 
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
@@ -100,10 +100,15 @@ class GitHubService {
           );
         }
       }
+    } on SocketException catch (_) {
+      return const TokenVerifyResult(
+        success: false,
+        errorMessage: 'Network error: Unable to resolve api.github.com. Check your internet connection.',
+      );
     } catch (e) {
       return TokenVerifyResult(
         success: false,
-        errorMessage: 'Network error connecting to GitHub: $e',
+        errorMessage: 'Connection failed: $e',
       );
     }
   }
@@ -113,7 +118,7 @@ class GitHubService {
       final res = await http.get(
         Uri.parse('$_baseUrl/user/repos?per_page=50&sort=updated'),
         headers: _headers(token),
-      );
+      ).timeout(const Duration(seconds: 15));
       if (res.statusCode == 200) {
         final list = jsonDecode(res.body) as List;
         return list.map((e) => {
@@ -142,7 +147,7 @@ class GitHubService {
         'description': description,
         'auto_init': true,
       }),
-    );
+    ).timeout(const Duration(seconds: 15));
     return res.statusCode == 201;
   }
 
@@ -204,166 +209,177 @@ class GitHubService {
     String? parentCommitSha;
     String? baseTreeSha;
 
-    final refRes = await http.get(
-      Uri.parse('$_baseUrl/repos/$owner/$repoName/git/ref/heads/$branch'),
-      headers: _headers(token),
-    );
+    try {
+      final refRes = await http.get(
+        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/ref/heads/$branch'),
+        headers: _headers(token),
+      ).timeout(const Duration(seconds: 15));
 
-    if (refRes.statusCode == 200) {
-      final refData = jsonDecode(refRes.body);
-      parentCommitSha = refData['object']['sha'];
-      final commitRes = await http.get(
-        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/commits/$parentCommitSha'),
-        headers: _headers(token),
-      );
-      if (commitRes.statusCode == 200) {
-        baseTreeSha = jsonDecode(commitRes.body)['tree']['sha'];
-      }
-    } else {
-      final defaultRefRes = await http.get(
-        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/ref/heads/main'),
-        headers: _headers(token),
-      );
-      if (defaultRefRes.statusCode == 200) {
-        final refData = jsonDecode(defaultRefRes.body);
+      if (refRes.statusCode == 200) {
+        final refData = jsonDecode(refRes.body);
         parentCommitSha = refData['object']['sha'];
         final commitRes = await http.get(
           Uri.parse('$_baseUrl/repos/$owner/$repoName/git/commits/$parentCommitSha'),
           headers: _headers(token),
-        );
+        ).timeout(const Duration(seconds: 15));
         if (commitRes.statusCode == 200) {
           baseTreeSha = jsonDecode(commitRes.body)['tree']['sha'];
         }
-      }
-    }
-
-    final treeNodes = <Map<String, dynamic>>[];
-    int uploadedCount = 0;
-
-    for (final entry in filesToUpload.entries) {
-      final file = entry.value;
-      final relPath = p.relative(file.path, from: workingDir).replaceAll(r'\', '/');
-      final ext = p.extension(file.path).replaceFirst('.', '').toLowerCase();
-      final isBinary = _binaryExtensions.contains(ext);
-
-      String contentBase64;
-      String encoding;
-
-      if (isBinary) {
-        final bytes = await file.readAsBytes();
-        contentBase64 = base64Encode(bytes);
-        encoding = 'base64';
       } else {
-        try {
-          final str = await file.readAsString();
-          contentBase64 = base64Encode(utf8.encode(str));
-          encoding = 'base64';
-        } catch (_) {
+        final defaultRefRes = await http.get(
+          Uri.parse('$_baseUrl/repos/$owner/$repoName/git/ref/heads/main'),
+          headers: _headers(token),
+        ).timeout(const Duration(seconds: 15));
+        if (defaultRefRes.statusCode == 200) {
+          final refData = jsonDecode(defaultRefRes.body);
+          parentCommitSha = refData['object']['sha'];
+          final commitRes = await http.get(
+            Uri.parse('$_baseUrl/repos/$owner/$repoName/git/commits/$parentCommitSha'),
+            headers: _headers(token),
+          ).timeout(const Duration(seconds: 15));
+          if (commitRes.statusCode == 200) {
+            baseTreeSha = jsonDecode(commitRes.body)['tree']['sha'];
+          }
+        }
+      }
+
+      final treeNodes = <Map<String, dynamic>>[];
+      int uploadedCount = 0;
+
+      for (final entry in filesToUpload.entries) {
+        final file = entry.value;
+        final relPath = p.relative(file.path, from: workingDir).replaceAll(r'\', '/');
+        final ext = p.extension(file.path).replaceFirst('.', '').toLowerCase();
+        final isBinary = _binaryExtensions.contains(ext);
+
+        String contentBase64;
+        String encoding;
+
+        if (isBinary) {
           final bytes = await file.readAsBytes();
           contentBase64 = base64Encode(bytes);
           encoding = 'base64';
+        } else {
+          try {
+            final str = await file.readAsString();
+            contentBase64 = base64Encode(utf8.encode(str));
+            encoding = 'base64';
+          } catch (_) {
+            final bytes = await file.readAsBytes();
+            contentBase64 = base64Encode(bytes);
+            encoding = 'base64';
+          }
+        }
+
+        final blobRes = await http.post(
+          Uri.parse('$_baseUrl/repos/$owner/$repoName/git/blobs'),
+          headers: _headers(token),
+          body: jsonEncode({
+            'content': contentBase64,
+            'encoding': encoding,
+          }),
+        ).timeout(const Duration(seconds: 20));
+
+        if (blobRes.statusCode == 201) {
+          final blobSha = jsonDecode(blobRes.body)['sha'];
+          treeNodes.add({
+            'path': relPath,
+            'mode': '100644',
+            'type': 'blob',
+            'sha': blobSha,
+          });
+          uploadedCount++;
+          if (uploadedCount % 5 == 0 || uploadedCount == filesToUpload.length) {
+            onLog('Uploaded $uploadedCount/${filesToUpload.length} files as Git blobs...', LogLevel.info);
+          }
+        } else {
+          onLog('Failed to upload blob for $relPath: ${blobRes.body}', LogLevel.warning);
         }
       }
 
-      final blobRes = await http.post(
-        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/blobs'),
-        headers: _headers(token),
-        body: jsonEncode({
-          'content': contentBase64,
-          'encoding': encoding,
-        }),
-      );
+      onLog('Creating Git Tree with $uploadedCount entries...', LogLevel.info);
+      final treePayload = <String, dynamic>{
+        'tree': treeNodes,
+      };
+      if (baseTreeSha != null) {
+        treePayload['base_tree'] = baseTreeSha;
+      }
 
-      if (blobRes.statusCode == 201) {
-        final blobSha = jsonDecode(blobRes.body)['sha'];
-        treeNodes.add({
-          'path': relPath,
-          'mode': '100644',
-          'type': 'blob',
-          'sha': blobSha,
-        });
-        uploadedCount++;
-        if (uploadedCount % 5 == 0 || uploadedCount == filesToUpload.length) {
-          onLog('Uploaded $uploadedCount/${filesToUpload.length} files as Git blobs...', LogLevel.info);
+      final treeRes = await http.post(
+        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/trees'),
+        headers: _headers(token),
+        body: jsonEncode(treePayload),
+      ).timeout(const Duration(seconds: 20));
+
+      if (treeRes.statusCode != 201) {
+        onLog('Failed to create Git Tree: ${treeRes.body}', LogLevel.error);
+        return;
+      }
+
+      final newTreeSha = jsonDecode(treeRes.body)['sha'];
+
+      onLog('Creating commit "$commitMessage"...', LogLevel.info);
+      final commitPayload = <String, dynamic>{
+        'message': commitMessage,
+        'tree': newTreeSha,
+      };
+      if (parentCommitSha != null) {
+        commitPayload['parents'] = [parentCommitSha];
+      } else {
+        commitPayload['parents'] = [];
+      }
+
+      final commitRes = await http.post(
+        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/commits'),
+        headers: _headers(token),
+        body: jsonEncode(commitPayload),
+      ).timeout(const Duration(seconds: 20));
+
+      if (commitRes.statusCode != 201) {
+        onLog('Failed to create commit: ${commitRes.body}', LogLevel.error);
+        return;
+      }
+
+      final newCommitSha = jsonDecode(commitRes.body)['sha'];
+      final shortSha = newCommitSha.toString().substring(0, 7);
+
+      final checkRef = await http.get(
+        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/ref/heads/$branch'),
+        headers: _headers(token),
+      ).timeout(const Duration(seconds: 15));
+
+      if (checkRef.statusCode == 200) {
+        final updateRefRes = await http.patch(
+          Uri.parse('$_baseUrl/repos/$owner/$repoName/git/refs/heads/$branch'),
+          headers: _headers(token),
+          body: jsonEncode({'sha': newCommitSha, 'force': true}),
+        ).timeout(const Duration(seconds: 15));
+        if (updateRefRes.statusCode == 200) {
+          onLog('[SUCCESS] Pushed commit $shortSha to branch "$branch"', LogLevel.success);
+          onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogLevel.success);
+        } else {
+          onLog('Failed to update branch reference: ${updateRefRes.body}', LogLevel.error);
         }
       } else {
-        onLog('Failed to upload blob for $relPath: ${blobRes.body}', LogLevel.warning);
+        final createRefRes = await http.post(
+          Uri.parse('$_baseUrl/repos/$owner/$repoName/git/refs'),
+          headers: _headers(token),
+          body: jsonEncode({
+            'ref': 'refs/heads/$branch',
+            'sha': newCommitSha,
+          }),
+        ).timeout(const Duration(seconds: 15));
+        if (createRefRes.statusCode == 201) {
+          onLog('[SUCCESS] Created new branch "$branch" with commit $shortSha', LogLevel.success);
+          onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogLevel.success);
+        } else {
+          onLog('Failed to create branch reference: ${createRefRes.body}', LogLevel.error);
+        }
       }
-    }
-
-    onLog('Creating Git Tree with $uploadedCount entries...', LogLevel.info);
-    final treePayload = <String, dynamic>{
-      'tree': treeNodes,
-    };
-    if (baseTreeSha != null) {
-      treePayload['base_tree'] = baseTreeSha;
-    }
-
-    final treeRes = await http.post(
-      Uri.parse('$_baseUrl/repos/$owner/$repoName/git/trees'),
-      headers: _headers(token),
-      body: jsonEncode(treePayload),
-    );
-
-    if (treeRes.statusCode != 201) {
-      onLog('Failed to create Git Tree: ${treeRes.body}', LogLevel.error);
-      return;
-    }
-
-    final newTreeSha = jsonDecode(treeRes.body)['sha'];
-
-    onLog('Creating commit "$commitMessage"...', LogLevel.info);
-    final commitPayload = <String, dynamic>{
-      'message': commitMessage,
-      'tree': newTreeSha,
-    };
-    if (parentCommitSha != null) {
-      commitPayload['parents'] = [parentCommitSha];
-    } else {
-      commitPayload['parents'] = [];
-    }
-
-    final commitRes = await http.post(
-      Uri.parse('$_baseUrl/repos/$owner/$repoName/git/commits'),
-      headers: _headers(token),
-      body: jsonEncode(commitPayload),
-    );
-
-    if (commitRes.statusCode != 201) {
-      onLog('Failed to create commit: ${commitRes.body}', LogLevel.error);
-      return;
-    }
-
-    final newCommitSha = jsonDecode(commitRes.body)['sha'];
-    final shortSha = newCommitSha.toString().substring(0, 7);
-
-    if (refRes.statusCode == 200) {
-      final updateRefRes = await http.patch(
-        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/refs/heads/$branch'),
-        headers: _headers(token),
-        body: jsonEncode({'sha': newCommitSha, 'force': true}),
-      );
-      if (updateRefRes.statusCode == 200) {
-        onLog('[SUCCESS] Pushed commit $shortSha to branch "$branch"', LogLevel.success);
-        onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogLevel.success);
-      } else {
-        onLog('Failed to update branch reference: ${updateRefRes.body}', LogLevel.error);
-      }
-    } else {
-      final createRefRes = await http.post(
-        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/refs'),
-        headers: _headers(token),
-        body: jsonEncode({
-          'ref': 'refs/heads/$branch',
-          'sha': newCommitSha,
-        }),
-      );
-      if (createRefRes.statusCode == 201) {
-        onLog('[SUCCESS] Created new branch "$branch" with commit $shortSha', LogLevel.success);
-        onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogLevel.success);
-      } else {
-        onLog('Failed to create branch reference: ${createRefRes.body}', LogLevel.error);
-      }
+    } on SocketException catch (_) {
+      onLog('Network error: Unable to reach GitHub. Please check device internet connection.', LogLevel.error);
+    } catch (e) {
+      onLog('Unexpected error during GitHub push: $e', LogLevel.error);
     }
   }
 }
