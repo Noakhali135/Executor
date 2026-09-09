@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import '../models/tree_node.dart';
 import '../services/export_service.dart';
+import '../widgets/file_editor_dialog.dart';
 
 class ExplorerScreen extends StatefulWidget {
   final String workingDir;
@@ -412,33 +413,27 @@ class ExplorerScreenState extends State<ExplorerScreen> {
       return;
     }
 
-    try {
-      final file = File(node.fullPath);
-      final content = await file.readAsString();
-      final relPath = p.relative(node.fullPath, from: widget.workingDir);
-      widget.onFileSelected(relPath, content);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Loaded "${node.name}" into Editor'),
-            duration: const Duration(milliseconds: 1200),
-            backgroundColor: const Color(0xFF1E293B),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to read file: $e'),
-            backgroundColor: const Color(0xFFDC2626),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    }
+    await showDialog(
+      context: context,
+      builder: (ctx) => FileEditorDialog(
+        filePath: node.fullPath,
+        workingDir: widget.workingDir,
+        onSaved: () {
+          _loadDirectoryTree();
+        },
+        onSendToRunner: (content) {
+          final relPath = p.relative(node.fullPath, from: widget.workingDir);
+          widget.onFileSelected(relPath, content);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Loaded "${node.name}" into Runner Editor'),
+              backgroundColor: const Color(0xFF6366F1),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        },
+      ),
+    );
   }
 
   void _showCreateDialog() {
@@ -484,7 +479,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                 autofocus: true,
                 style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 12.5),
                 decoration: InputDecoration(
-                  hintText: isFolder ? 'folder_name' : 'filename.txt',
+                  hintText: isFolder ? 'folder_name' : 'index.html',
                   hintStyle: const TextStyle(color: Color(0xFF475569)),
                   filled: true,
                   fillColor: const Color(0xFF090D16),
@@ -538,8 +533,13 @@ class ExplorerScreenState extends State<ExplorerScreen> {
 
     final ext = node.extension;
     switch (ext) {
+      case 'html':
+      case 'htm':
+        return const Icon(Icons.html_rounded, size: 16, color: Color(0xFFF97316));
       case 'py':
         return const Icon(Icons.code_rounded, size: 16, color: Color(0xFF38BDF8));
+      case 'dart':
+        return const Icon(Icons.flutter_dash, size: 16, color: Color(0xFF0284C7));
       case 'json':
         return const Icon(Icons.data_object_rounded, size: 16, color: Color(0xFF22D3EE));
       case 'csv':
@@ -548,6 +548,12 @@ class ExplorerScreenState extends State<ExplorerScreen> {
         return const Icon(Icons.description_rounded, size: 16, color: Color(0xFF60A5FA));
       case 'sh':
         return const Icon(Icons.terminal_rounded, size: 16, color: Color(0xFFA78BFA));
+      case 'png':
+      case 'jpg':
+      case 'jpeg':
+      case 'gif':
+      case 'webp':
+        return const Icon(Icons.image_rounded, size: 16, color: Color(0xFF10B981));
       default:
         return const Icon(Icons.insert_drive_file_outlined, size: 16, color: Color(0xFF94A3B8));
     }
@@ -768,13 +774,13 @@ class ExplorerScreenState extends State<ExplorerScreen> {
             ),
             child: Row(
               children: [
-                const Icon(Icons.info_outline_rounded, size: 15, color: Color(0xFF818CF8)),
+                const Icon(Icons.touch_app_rounded, size: 15, color: Color(0xFF818CF8)),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     _isSelectionMode
                         ? 'Select files/folders and tap "Export" to generate batch script.'
-                        : 'Long press any item to select and export as batch script!',
+                        : 'Tap any file to view, edit, or run HTML! Long-press to select.',
                     style: const TextStyle(
                       color: Color(0xFFC7D2FE),
                       fontSize: 11.5,
