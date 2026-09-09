@@ -80,8 +80,9 @@ class _RunnerScreenState extends State<RunnerScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Pasted from clipboard'),
-            duration: Duration(milliseconds: 1000),
+            duration: Duration(milliseconds: 900),
             backgroundColor: Color(0xFF1E293B),
+            behavior: SnackBarBehavior.floating,
           ),
         );
       }
@@ -101,7 +102,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
       if (_terminalScrollController.hasClients) {
         _terminalScrollController.animateTo(
           _terminalScrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
+          duration: const Duration(milliseconds: 180),
           curve: Curves.easeOut,
         );
       }
@@ -111,7 +112,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
   Future<void> _executeScript() async {
     final text = widget.codeController.text;
     if (text.trim().isEmpty) {
-      _addLog('Warning: Code/Command input is empty.', LogLevel.warning);
+      _addLog('Warning: Command buffer is empty.', LogLevel.warning);
       return;
     }
 
@@ -132,7 +133,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
     }
 
     if (!parseResult.hasActions) {
-      _addLog('No valid commands found to execute.', LogLevel.warning);
+      _addLog('No valid actions found to execute.', LogLevel.warning);
       setState(() {
         _isExecuting = false;
       });
@@ -151,7 +152,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
             if (_terminalScrollController.hasClients) {
               _terminalScrollController.animateTo(
                 _terminalScrollController.position.maxScrollExtent,
-                duration: const Duration(milliseconds: 200),
+                duration: const Duration(milliseconds: 180),
                 curve: Curves.easeOut,
               );
             }
@@ -173,18 +174,18 @@ class _RunnerScreenState extends State<RunnerScreen> {
   Widget build(BuildContext context) {
     return SingleChildScrollView(
       physics: const BouncingScrollPhysics(),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildWorkingDirectoryCard(),
-          const SizedBox(height: 14),
+          const SizedBox(height: 8),
           _buildEditorCard(),
-          const SizedBox(height: 14),
+          const SizedBox(height: 8),
           _buildExecuteButton(),
-          const SizedBox(height: 14),
+          const SizedBox(height: 8),
           _buildTerminalCard(),
-          const SizedBox(height: 24),
+          const SizedBox(height: 12),
         ],
       ),
     );
@@ -197,11 +198,11 @@ class _RunnerScreenState extends State<RunnerScreen> {
 
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF101626),
-        borderRadius: BorderRadius.circular(16),
+        color: const Color(0xFF0F1523),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: const Color(0xFF1E293B)),
       ),
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -210,14 +211,14 @@ class _RunnerScreenState extends State<RunnerScreen> {
             children: [
               const Row(
                 children: [
-                  Icon(Icons.folder, size: 16, color: Color(0xFF38BDF8)),
-                  SizedBox(width: 8),
+                  Icon(Icons.folder, size: 14, color: Color(0xFF38BDF8)),
+                  SizedBox(width: 6),
                   Text(
                     'WORKING DIRECTORY',
                     style: TextStyle(
                       color: Color(0xFF94A3B8),
-                      fontSize: 11,
-                      letterSpacing: 1.0,
+                      fontSize: 10.5,
+                      letterSpacing: 0.8,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
@@ -226,30 +227,30 @@ class _RunnerScreenState extends State<RunnerScreen> {
               Text(
                 'Local storage',
                 style: TextStyle(
-                  color: Colors.white.withOpacity(0.4),
-                  fontSize: 11,
+                  color: Colors.white.withOpacity(0.35),
+                  fontSize: 10.5,
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
           Row(
             children: [
               Expanded(
                 child: GestureDetector(
                   onTap: _handleBrowse,
                   child: Container(
-                    height: 44,
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    height: 38,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF090D16),
-                      borderRadius: BorderRadius.circular(10),
+                      color: const Color(0xFF080C16),
+                      borderRadius: BorderRadius.circular(8),
                       border: Border.all(color: const Color(0xFF1E293B)),
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.storage_rounded, size: 17, color: Color(0xFF64748B)),
-                        const SizedBox(width: 10),
+                        const Icon(Icons.storage_rounded, size: 15, color: Color(0xFF64748B)),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: Text(
                             pathDisplay,
@@ -259,7 +260,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
                                   ? const Color(0xFF64748B)
                                   : const Color(0xFFE2E8F0),
                               fontFamily: 'monospace',
-                              fontSize: 13,
+                              fontSize: 12,
                             ),
                           ),
                         ),
@@ -268,27 +269,27 @@ class _RunnerScreenState extends State<RunnerScreen> {
                   ),
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 8),
               SizedBox(
-                height: 44,
+                height: 38,
                 child: ElevatedButton.icon(
                   onPressed: _handleBrowse,
-                  icon: const Icon(Icons.folder_open, size: 17, color: Colors.white),
+                  icon: const Icon(Icons.folder_open, size: 15, color: Colors.white),
                   label: const Text(
                     'Browse',
                     style: TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.w600,
-                      fontSize: 13,
+                      fontSize: 12,
                     ),
                   ),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF6366F1),
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
+                      borderRadius: BorderRadius.circular(8),
                     ),
                     elevation: 0,
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
                   ),
                 ),
               ),
@@ -302,35 +303,35 @@ class _RunnerScreenState extends State<RunnerScreen> {
   Widget _buildEditorCard() {
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF101626),
-        borderRadius: BorderRadius.circular(16),
+        color: const Color(0xFF0F1523),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: const Color(0xFF1E293B)),
       ),
       child: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Row(
                   children: [
                     Container(
-                      width: 8,
-                      height: 8,
+                      width: 7,
+                      height: 7,
                       decoration: const BoxDecoration(
                         color: Color(0xFF38BDF8),
                         shape: BoxShape.circle,
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 7),
                     const Text(
-                      'main.py',
+                      'Command Buffer',
                       style: TextStyle(
                         color: Color(0xFFE2E8F0),
                         fontFamily: 'monospace',
                         fontWeight: FontWeight.w600,
-                        fontSize: 13,
+                        fontSize: 12,
                       ),
                     ),
                   ],
@@ -342,7 +343,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
                       label: 'Paste',
                       onTap: _handlePaste,
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
                     _buildPillButton(
                       icon: Icons.delete_outline,
                       label: 'Clear',
@@ -356,9 +357,9 @@ class _RunnerScreenState extends State<RunnerScreen> {
           ),
           const Divider(height: 1, color: Color(0xFF1E293B)),
           Container(
-            height: 210,
+            height: 180,
             color: const Color(0xFF070B14),
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(10),
             child: TextField(
               controller: widget.codeController,
               maxLines: null,
@@ -366,8 +367,8 @@ class _RunnerScreenState extends State<RunnerScreen> {
               style: const TextStyle(
                 color: Color(0xFFCBD5E1),
                 fontFamily: 'monospace',
-                fontSize: 13,
-                height: 1.45,
+                fontSize: 12.5,
+                height: 1.4,
               ),
               decoration: const InputDecoration(
                 isDense: true,
@@ -377,14 +378,14 @@ class _RunnerScreenState extends State<RunnerScreen> {
                 hintStyle: TextStyle(
                   color: Color(0xFF475569),
                   fontFamily: 'monospace',
-                  fontSize: 13,
+                  fontSize: 12.5,
                 ),
               ),
             ),
           ),
           const Divider(height: 1, color: Color(0xFF1E293B)),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -393,15 +394,15 @@ class _RunnerScreenState extends State<RunnerScreen> {
                   style: const TextStyle(
                     color: Color(0xFF64748B),
                     fontFamily: 'monospace',
-                    fontSize: 12,
+                    fontSize: 11,
                   ),
                 ),
                 const Text(
-                  'Python 3.11',
+                  'Batch Engine',
                   style: TextStyle(
                     color: Color(0xFF818CF8),
                     fontFamily: 'monospace',
-                    fontSize: 12,
+                    fontSize: 11,
                   ),
                 ),
               ],
@@ -420,23 +421,23 @@ class _RunnerScreenState extends State<RunnerScreen> {
   }) {
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(6),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
           color: const Color(0xFF1E293B),
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(6),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 14, color: iconColor ?? const Color(0xFF94A3B8)),
-            const SizedBox(width: 5),
+            Icon(icon, size: 13, color: iconColor ?? const Color(0xFF94A3B8)),
+            const SizedBox(width: 4),
             Text(
               label,
               style: const TextStyle(
                 color: Color(0xFFE2E8F0),
-                fontSize: 12,
+                fontSize: 11,
                 fontWeight: FontWeight.w500,
               ),
             ),
@@ -448,36 +449,35 @@ class _RunnerScreenState extends State<RunnerScreen> {
 
   Widget _buildExecuteButton() {
     return SizedBox(
-      height: 52,
+      height: 44,
       child: ElevatedButton(
         onPressed: _isExecuting ? null : _executeScript,
         style: ElevatedButton.styleFrom(
           backgroundColor: const Color(0xFF10B981),
           disabledBackgroundColor: const Color(0xFF065F46),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-          elevation: 4,
-          shadowColor: const Color(0xFF10B981).withOpacity(0.4),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          elevation: 2,
         ),
         child: _isExecuting
             ? const Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   SizedBox(
-                    width: 18,
-                    height: 18,
+                    width: 16,
+                    height: 16,
                     child: CircularProgressIndicator(
                       strokeWidth: 2,
                       color: Colors.white,
                     ),
                   ),
-                  SizedBox(width: 12),
+                  SizedBox(width: 10),
                   Text(
                     'EXECUTING SCRIPT...',
                     style: TextStyle(
                       color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 1.0,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.8,
                     ),
                   ),
                 ],
@@ -485,15 +485,15 @@ class _RunnerScreenState extends State<RunnerScreen> {
             : const Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.play_arrow_rounded, color: Colors.white, size: 22),
-                  SizedBox(width: 6),
+                  Icon(Icons.play_arrow_rounded, color: Colors.white, size: 20),
+                  SizedBox(width: 5),
                   Text(
                     'EXECUTE SCRIPT',
                     style: TextStyle(
                       color: Colors.white,
-                      fontSize: 14,
+                      fontSize: 13,
                       fontWeight: FontWeight.w800,
-                      letterSpacing: 1.0,
+                      letterSpacing: 0.8,
                     ),
                   ),
                 ],
@@ -506,26 +506,26 @@ class _RunnerScreenState extends State<RunnerScreen> {
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF0B101D),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: const Color(0xFF1E293B)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Row(
                   children: [
-                    Icon(Icons.terminal_rounded, size: 16, color: Color(0xFF38BDF8)),
-                    SizedBox(width: 8),
+                    Icon(Icons.terminal_rounded, size: 14, color: Color(0xFF38BDF8)),
+                    SizedBox(width: 6),
                     Text(
                       'EXECUTION OUTPUT',
                       style: TextStyle(
                         color: Colors.white,
-                        fontSize: 12,
+                        fontSize: 11,
                         letterSpacing: 0.8,
                         fontWeight: FontWeight.bold,
                       ),
@@ -540,8 +540,8 @@ class _RunnerScreenState extends State<RunnerScreen> {
                   },
                   borderRadius: BorderRadius.circular(6),
                   child: const Padding(
-                    padding: EdgeInsets.all(4.0),
-                    child: Icon(Icons.block_rounded, size: 16, color: Color(0xFF64748B)),
+                    padding: EdgeInsets.all(3.0),
+                    child: Icon(Icons.block_rounded, size: 15, color: Color(0xFF64748B)),
                   ),
                 ),
               ],
@@ -549,9 +549,9 @@ class _RunnerScreenState extends State<RunnerScreen> {
           ),
           const Divider(height: 1, color: Color(0xFF1E293B)),
           Container(
-            height: 170,
+            height: 150,
             color: const Color(0xFF050811),
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(10),
             child: _terminalLogs.isEmpty
                 ? const Align(
                     alignment: Alignment.topLeft,
@@ -561,7 +561,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
                         color: Color(0xFF475569),
                         fontFamily: 'monospace',
                         fontStyle: FontStyle.italic,
-                        fontSize: 12.5,
+                        fontSize: 11.5,
                       ),
                     ),
                   )
@@ -586,14 +586,14 @@ class _RunnerScreenState extends State<RunnerScreen> {
                           textColor = const Color(0xFF94A3B8);
                       }
                       return Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 2.0),
+                        padding: const EdgeInsets.symmetric(vertical: 1.5),
                         child: Text(
                           '[${log.formattedTime}] ${log.message}',
                           style: TextStyle(
                             color: textColor,
                             fontFamily: 'monospace',
-                            fontSize: 12,
-                            height: 1.35,
+                            fontSize: 11.5,
+                            height: 1.3,
                           ),
                         ),
                       );

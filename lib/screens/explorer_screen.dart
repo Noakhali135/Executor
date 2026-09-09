@@ -224,7 +224,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Loaded "${node.name}" into Editor'),
-            duration: const Duration(milliseconds: 1400),
+            duration: const Duration(milliseconds: 1200),
             backgroundColor: const Color(0xFF1E293B),
             behavior: SnackBarBehavior.floating,
           ),
@@ -236,6 +236,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
           SnackBar(
             content: Text('Failed to read file: $e'),
             backgroundColor: const Color(0xFFDC2626),
+            behavior: SnackBarBehavior.floating,
           ),
         );
       }
@@ -252,12 +253,12 @@ class ExplorerScreenState extends State<ExplorerScreen> {
         builder: (context, setDialogState) => AlertDialog(
           backgroundColor: const Color(0xFF111827),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(14),
             side: const BorderSide(color: Color(0xFF1E293B)),
           ),
           title: const Text(
             'Create New Item',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
           ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
@@ -279,18 +280,18 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
               TextField(
                 controller: nameController,
                 autofocus: true,
-                style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 13),
+                style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 12.5),
                 decoration: InputDecoration(
-                  hintText: isFolder ? 'folder_name' : 'script.py',
+                  hintText: isFolder ? 'folder_name' : 'filename.txt',
                   hintStyle: const TextStyle(color: Color(0xFF475569)),
                   filled: true,
                   fillColor: const Color(0xFF090D16),
                   border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(8),
                     borderSide: const BorderSide(color: Color(0xFF1E293B)),
                   ),
                 ),
@@ -332,7 +333,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
     if (node.isDirectory) {
       return Icon(
         node.isExpanded ? Icons.folder_open_rounded : Icons.folder_rounded,
-        size: 18,
+        size: 16,
         color: const Color(0xFFF59E0B),
       );
     }
@@ -340,17 +341,17 @@ class ExplorerScreenState extends State<ExplorerScreen> {
     final ext = node.extension;
     switch (ext) {
       case 'py':
-        return const Icon(Icons.code_rounded, size: 18, color: Color(0xFF38BDF8));
+        return const Icon(Icons.code_rounded, size: 16, color: Color(0xFF38BDF8));
       case 'json':
-        return const Icon(Icons.data_object_rounded, size: 18, color: Color(0xFF22D3EE));
+        return const Icon(Icons.data_object_rounded, size: 16, color: Color(0xFF22D3EE));
       case 'csv':
-        return const Icon(Icons.table_chart_rounded, size: 18, color: Color(0xFF34D399));
+        return const Icon(Icons.table_chart_rounded, size: 16, color: Color(0xFF34D399));
       case 'md':
-        return const Icon(Icons.description_rounded, size: 18, color: Color(0xFF60A5FA));
+        return const Icon(Icons.description_rounded, size: 16, color: Color(0xFF60A5FA));
       case 'sh':
-        return const Icon(Icons.terminal_rounded, size: 18, color: Color(0xFFA78BFA));
+        return const Icon(Icons.terminal_rounded, size: 16, color: Color(0xFFA78BFA));
       default:
-        return const Icon(Icons.insert_drive_file_outlined, size: 18, color: Color(0xFF94A3B8));
+        return const Icon(Icons.insert_drive_file_outlined, size: 16, color: Color(0xFF94A3B8));
     }
   }
 
@@ -361,14 +362,14 @@ class ExplorerScreenState extends State<ExplorerScreen> {
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
           child: Container(
             decoration: BoxDecoration(
-              color: const Color(0xFF101626),
-              borderRadius: BorderRadius.circular(16),
+              color: const Color(0xFF0F1523),
+              borderRadius: BorderRadius.circular(12),
               border: Border.all(color: const Color(0xFF1E293B)),
             ),
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             child: Column(
               children: [
                 Row(
@@ -376,14 +377,14 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                   children: [
                     const Row(
                       children: [
-                        Icon(Icons.account_tree_outlined, size: 18, color: Color(0xFF818CF8)),
-                        SizedBox(width: 8),
+                        Icon(Icons.account_tree_outlined, size: 16, color: Color(0xFF818CF8)),
+                        SizedBox(width: 6),
                         Text(
                           'FILE EXPLORER',
                           style: TextStyle(
                             color: Colors.white,
-                            fontSize: 13,
-                            letterSpacing: 1.0,
+                            fontSize: 12,
+                            letterSpacing: 0.8,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
@@ -396,13 +397,13 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                           tooltip: 'Expand All',
                           onTap: _expandAll,
                         ),
-                        const SizedBox(width: 6),
+                        const SizedBox(width: 5),
                         _buildSmallIconButton(
                           icon: Icons.unfold_less,
                           tooltip: 'Collapse All',
                           onTap: _collapseAll,
                         ),
-                        const SizedBox(width: 6),
+                        const SizedBox(width: 5),
                         _buildSmallIconButton(
                           icon: Icons.add,
                           tooltip: 'Add File/Folder',
@@ -413,24 +414,24 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 8),
                 Container(
-                  height: 40,
+                  height: 36,
                   decoration: BoxDecoration(
-                    color: const Color(0xFF090D16),
-                    borderRadius: BorderRadius.circular(10),
+                    color: const Color(0xFF080C16),
+                    borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: const Color(0xFF1E293B)),
                   ),
                   child: TextField(
                     controller: _searchController,
-                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                    style: const TextStyle(color: Colors.white, fontSize: 12.5),
                     decoration: const InputDecoration(
                       isDense: true,
-                      prefixIcon: Icon(Icons.search, size: 18, color: Color(0xFF64748B)),
+                      prefixIcon: Icon(Icons.search, size: 16, color: Color(0xFF64748B)),
                       hintText: 'Filter files or folders...',
-                      hintStyle: TextStyle(color: Color(0xFF64748B), fontSize: 13),
+                      hintStyle: TextStyle(color: Color(0xFF64748B), fontSize: 12),
                       border: InputBorder.none,
-                      contentPadding: EdgeInsets.symmetric(vertical: 10),
+                      contentPadding: EdgeInsets.symmetric(vertical: 8),
                     ),
                   ),
                 ),
@@ -440,38 +441,38 @@ class ExplorerScreenState extends State<ExplorerScreen> {
         ),
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Container(
               decoration: BoxDecoration(
                 color: const Color(0xFF0C111E),
-                borderRadius: BorderRadius.circular(16),
+                borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: const Color(0xFF1E293B)),
               ),
               child: Column(
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     decoration: const BoxDecoration(
                       border: Border(bottom: BorderSide(color: Color(0xFF1E293B))),
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.storage_rounded, size: 16, color: Color(0xFF64748B)),
-                        const SizedBox(width: 8),
+                        const Icon(Icons.storage_rounded, size: 14, color: Color(0xFF64748B)),
+                        const SizedBox(width: 6),
                         Expanded(
                           child: Text(
                             widget.workingDir.isEmpty ? '/...' : widget.workingDir,
                             style: const TextStyle(
                               color: Color(0xFF94A3B8),
                               fontFamily: 'monospace',
-                              fontSize: 12,
+                              fontSize: 11.5,
                             ),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         InkWell(
                           onTap: _loadDirectoryTree,
-                          child: const Icon(Icons.refresh, size: 16, color: Color(0xFF64748B)),
+                          child: const Icon(Icons.refresh, size: 15, color: Color(0xFF64748B)),
                         ),
                       ],
                     ),
@@ -490,7 +491,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                                   widget.workingDir.isEmpty
                                       ? 'Select a working directory in Runner'
                                       : 'Directory is empty',
-                                  style: const TextStyle(color: Color(0xFF64748B), fontSize: 13),
+                                  style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
                                 ),
                               )
                             : ListView.builder(
@@ -508,24 +509,24 @@ class ExplorerScreenState extends State<ExplorerScreen> {
           ),
         ),
         Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(12),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             decoration: BoxDecoration(
               color: const Color(0xFF111728),
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(10),
               border: Border.all(color: const Color(0xFF312E81)),
             ),
             child: const Row(
               children: [
-                Icon(Icons.info_outline_rounded, size: 16, color: Color(0xFF818CF8)),
-                SizedBox(width: 10),
+                Icon(Icons.info_outline_rounded, size: 15, color: Color(0xFF818CF8)),
+                SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     'Tap any file in the tree to load its content directly into the code editor!',
                     style: TextStyle(
                       color: Color(0xFFC7D2FE),
-                      fontSize: 12,
+                      fontSize: 11.5,
                     ),
                   ),
                 ),
@@ -538,48 +539,48 @@ class ExplorerScreenState extends State<ExplorerScreen> {
   }
 
   Widget _buildTreeItemRow(TreeNode node) {
-    const double indentSize = 18.0;
+    const double indentSize = 16.0;
 
     return InkWell(
       onTap: () => _handleFileTap(node),
       child: Container(
         padding: EdgeInsets.only(
-          left: 12.0 + (node.depth * indentSize),
-          right: 12.0,
-          top: 7.0,
-          bottom: 7.0,
+          left: 10.0 + (node.depth * indentSize),
+          right: 10.0,
+          top: 5.0,
+          bottom: 5.0,
         ),
         child: Row(
           children: [
             if (node.depth > 0)
               Container(
                 width: 1,
-                height: 16,
+                height: 14,
                 color: const Color(0xFF1E293B),
-                margin: const EdgeInsets.only(right: 8),
+                margin: const EdgeInsets.only(right: 6),
               ),
             if (node.isDirectory)
               Padding(
-                padding: const EdgeInsets.only(right: 6.0),
+                padding: const EdgeInsets.only(right: 4.0),
                 child: Icon(
                   node.isExpanded
                       ? Icons.keyboard_arrow_down_rounded
                       : Icons.keyboard_arrow_right_rounded,
-                  size: 16,
+                  size: 15,
                   color: const Color(0xFF64748B),
                 ),
               )
             else
-              const SizedBox(width: 14),
+              const SizedBox(width: 12),
             _buildFileIcon(node),
-            const SizedBox(width: 8),
+            const SizedBox(width: 6),
             Expanded(
               child: Text(
                 node.name,
                 style: TextStyle(
                   color: node.isDirectory ? const Color(0xFFE2E8F0) : const Color(0xFFCBD5E1),
                   fontFamily: 'monospace',
-                  fontSize: 13,
+                  fontSize: 12.5,
                   fontWeight: node.isDirectory ? FontWeight.w600 : FontWeight.normal,
                 ),
                 overflow: TextOverflow.ellipsis,
@@ -601,17 +602,17 @@ class ExplorerScreenState extends State<ExplorerScreen> {
       message: tooltip,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(6),
         child: Container(
-          width: 32,
-          height: 32,
+          width: 28,
+          height: 28,
           decoration: BoxDecoration(
             color: isPrimary ? const Color(0xFF6366F1) : const Color(0xFF1E293B),
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(6),
           ),
           child: Icon(
             icon,
-            size: 16,
+            size: 15,
             color: Colors.white,
           ),
         ),
