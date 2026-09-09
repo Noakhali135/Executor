@@ -23,7 +23,9 @@ class FileEditorDialog extends StatefulWidget {
 
 class _FileEditorDialogState extends State<FileEditorDialog> {
   final TextEditingController _codeController = TextEditingController();
-  final UndoHistoryController _undoController = UndoHistoryController();
+  final List<String> _undoStack = [];
+  final List<String> _redoStack = [];
+  bool _isPerformingUndoRedo = false;
 
   String _savedContent = '';
   bool _isLoading = true;
@@ -59,7 +61,6 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
   void dispose() {
     _codeController.removeListener(_onTextChanged);
     _codeController.dispose();
-    _undoController.dispose();
     super.dispose();
   }
 
@@ -67,6 +68,14 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
     final text = _codeController.text;
     final lines = text.isEmpty ? 1 : text.split('\n').length;
     final hasContentChanged = (text != _savedContent);
+
+    if (!_isPerformingUndoRedo) {
+      if (_undoStack.isEmpty || _undoStack.last != text) {
+        _undoStack.add(text);
+        if (_undoStack.length > 60) _undoStack.removeAt(0);
+        _redoStack.clear();
+      }
+    }
 
     if (hasContentChanged != _isDirty || lines != _lineCount || text.length != _charCount) {
       if (mounted) {
@@ -76,6 +85,43 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
           _charCount = text.length;
         });
       }
+    }
+  }
+
+  void _undo() {
+    if (_undoStack.length > 1) {
+      _isPerformingUndoRedo = true;
+      final current = _undoStack.removeLast();
+      _redoStack.add(current);
+      final prev = _undoStack.last;
+      _codeController.text = prev;
+      _codeController.selection = TextSelection.collapsed(offset: prev.length);
+      _isPerformingUndoRedo = false;
+
+      final hasChanged = (prev != _savedContent);
+      setState(() {
+        _isDirty = hasChanged;
+        _lineCount = prev.isEmpty ? 1 : prev.split('\n').length;
+        _charCount = prev.length;
+      });
+    }
+  }
+
+  void _redo() {
+    if (_redoStack.isNotEmpty) {
+      _isPerformingUndoRedo = true;
+      final next = _redoStack.removeLast();
+      _undoStack.add(next);
+      _codeController.text = next;
+      _codeController.selection = TextSelection.collapsed(offset: next.length);
+      _isPerformingUndoRedo = false;
+
+      final hasChanged = (next != _savedContent);
+      setState(() {
+        _isDirty = hasChanged;
+        _lineCount = next.isEmpty ? 1 : next.split('\n').length;
+        _charCount = next.length;
+      });
     }
   }
 
@@ -115,7 +161,12 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
       if (mounted) {
         setState(() {
           _savedContent = text;
+          _isPerformingUndoRedo = true;
           _codeController.text = text;
+          _undoStack.clear();
+          _undoStack.add(text);
+          _redoStack.clear();
+          _isPerformingUndoRedo = false;
           _isDirty = false;
           _isLoading = false;
           _lineCount = text.isEmpty ? 1 : text.split('\n').length;
@@ -129,7 +180,12 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
         if (mounted) {
           setState(() {
             _savedContent = text;
+            _isPerformingUndoRedo = true;
             _codeController.text = text;
+            _undoStack.clear();
+            _undoStack.add(text);
+            _redoStack.clear();
+            _isPerformingUndoRedo = false;
             _isDirty = false;
             _isLoading = false;
             _lineCount = text.isEmpty ? 1 : text.split('\n').length;
@@ -204,6 +260,8 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
   Widget build(BuildContext context) {
     final fileName = p.basename(widget.filePath);
     final relPath = p.relative(widget.filePath, from: widget.workingDir);
+    final canUndo = _undoStack.length > 1;
+    final canRedo = _redoStack.isNotEmpty;
 
     return Dialog(
       backgroundColor: const Color(0xFF0F1523),
@@ -384,7 +442,6 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
                                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                                   child: TextField(
                                     controller: _codeController,
-                                    undoController: _undoController,
                                     maxLines: null,
                                     expands: true,
                                     style: const TextStyle(
@@ -416,41 +473,31 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
                           'Lines: $_lineCount | Chars: $_charCount',
                           style: const TextStyle(color: Color(0xFF64748B), fontFamily: 'monospace', fontSize: 11),
                         ),
-                        const SizedBox(width: 10),
-                        ValueListenableBuilder<UndoHistoryValue>(
-                          valueListenable: _undoController,
-                          builder: (context, value, child) {
-                            return Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                InkWell(
-                                  onTap: value.canUndo ? () => _undoController.undo() : null,
-                                  borderRadius: BorderRadius.circular(4),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                                    child: Icon(
-                                      Icons.undo_rounded,
-                                      size: 16,
-                                      color: value.canUndo ? const Color(0xFF818CF8) : const Color(0xFF334155),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 4),
-                                InkWell(
-                                  onTap: value.canRedo ? () => _undoController.redo() : null,
-                                  borderRadius: BorderRadius.circular(4),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                                    child: Icon(
-                                      Icons.redo_rounded,
-                                      size: 16,
-                                      color: value.canRedo ? const Color(0xFF818CF8) : const Color(0xFF334155),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            );
-                          },
+                        const SizedBox(width: 12),
+                        InkWell(
+                          onTap: canUndo ? _undo : null,
+                          borderRadius: BorderRadius.circular(4),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            child: Icon(
+                              Icons.undo_rounded,
+                              size: 16,
+                              color: canUndo ? const Color(0xFF818CF8) : const Color(0xFF334155),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        InkWell(
+                          onTap: canRedo ? _redo : null,
+                          borderRadius: BorderRadius.circular(4),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            child: Icon(
+                              Icons.redo_rounded,
+                              size: 16,
+                              color: canRedo ? const Color(0xFF818CF8) : const Color(0xFF334155),
+                            ),
+                          ),
                         ),
                       ],
                     ),
