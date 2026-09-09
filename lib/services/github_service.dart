@@ -1,5 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -17,17 +19,24 @@ class TokenVerifyResult {
   });
 }
 
+class _LocalFileToUpload {
+  final File file;
+  final String relPath;
+  final Uint8List bytes;
+  final String gitSha;
+
+  const _LocalFileToUpload({
+    required this.file,
+    required this.relPath,
+    required this.bytes,
+    required this.gitSha,
+  });
+}
+
 class GitHubService {
   static const String _keyToken = 'github_pat_token';
   static const String _keyUsername = 'github_pat_username';
   static const String _baseUrl = 'https://api.github.com';
-
-  static const Set<String> _binaryExtensions = {
-    'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svgz',
-    'zip', 'tar', 'gz', 'rar', '7z', 'pdf', 'mp3', 'mp4', 'wav',
-    'm4a', 'ogg', 'flac', 'ttf', 'otf', 'woff', 'woff2',
-    'apk', 'aab', 'so', 'dll', 'dylib', 'bin', 'dat', 'jar', 'exe',
-  };
 
   static Future<String?> getToken() async {
     final prefs = await SharedPreferences.getInstance();
@@ -60,6 +69,14 @@ class GitHubService {
       'X-GitHub-Api-Version': '2022-11-28',
       'Content-Type': 'application/json',
     };
+  }
+
+  static String _calculateGitBlobSha(Uint8List bytes) {
+    final header = utf8.encode('blob ${bytes.length}\x00');
+    final combined = Uint8List(header.length + bytes.length)
+      ..setRange(0, header.length, header)
+      ..setRange(header.length, header.length + bytes.length, bytes);
+    return sha1.convert(combined).toString();
   }
 
   static Future<TokenVerifyResult> verifyToken(String rawToken) async {
@@ -159,6 +176,33 @@ class GitHubService {
     }
   }
 
+  static Future<void> _runSlidingPool<T>({
+    required List<T> items,
+    required int concurrency,
+    required Future<void> Function(T item) worker,
+  }) async {
+    int nextIndex = 0;
+    final futures = <Future<void>>[];
+
+    Future<void> launchWorker() async {
+      while (true) {
+        int currentIndex;
+        if (nextIndex >= items.length) {
+          return;
+        }
+        currentIndex = nextIndex++;
+        await worker(items[currentIndex]);
+      }
+    }
+
+    final workerCount = items.length < concurrency ? items.length : concurrency;
+    for (int i = 0; i < workerCount; i++) {
+      futures.add(launchWorker());
+    }
+
+    await Future.wait(futures);
+  }
+
   static Future<void> pushWorkspace({
     required String token,
     required String owner,
@@ -173,21 +217,21 @@ class GitHubService {
     try {
       onLog('Connecting to GitHub API as @$owner...', LogLevel.info);
 
-      final filesToUpload = <String, File>{};
+      final fileEntries = <File>[];
 
       if (specificPaths != null && specificPaths.isNotEmpty) {
         for (final pth in specificPaths) {
           final f = File(pth);
           final d = Directory(pth);
           if (await f.exists()) {
-            filesToUpload[p.normalize(f.path)] = f;
+            fileEntries.add(f);
           } else if (await d.exists()) {
             final entries = await d.list(recursive: true, followLinks: false).toList();
             for (final e in entries) {
               if (e is File) {
                 final rel = p.relative(e.path, from: workingDir);
                 if (!p.split(rel).contains('.git')) {
-                  filesToUpload[p.normalize(e.path)] = e;
+                  fileEntries.add(e);
                 }
               }
             }
@@ -206,17 +250,17 @@ class GitHubService {
             if (p.split(rel).contains('.git')) {
               continue;
             }
-            filesToUpload[p.normalize(e.path)] = e;
+            fileEntries.add(e);
           }
         }
       }
 
-      if (filesToUpload.isEmpty) {
+      if (fileEntries.isEmpty) {
         onLog('No files found to push to GitHub.', LogLevel.warning);
         return;
       }
 
-      onLog('Found ${filesToUpload.length} file(s) to synchronize.', LogLevel.info);
+      onLog('Scanning ${fileEntries.length} file(s)...', LogLevel.info);
 
       String? parentCommitSha;
       String? baseTreeSha;
@@ -254,72 +298,101 @@ class GitHubService {
         }
       }
 
-      final treeNodes = <Map<String, dynamic>>[];
-      final entriesList = filesToUpload.entries.toList();
-      int uploadedCount = 0;
-      const int batchSize = 6;
+      final existingRemoteBlobs = <String, String>{};
+      if (baseTreeSha != null) {
+        try {
+          final treeFetchRes = await client.get(
+            Uri.parse('$_baseUrl/repos/$owner/$repoName/git/trees/$baseTreeSha?recursive=1'),
+            headers: _headers(token),
+          ).timeout(const Duration(seconds: 15));
 
-      for (int i = 0; i < entriesList.length; i += batchSize) {
-        final end = (i + batchSize < entriesList.length) ? i + batchSize : entriesList.length;
-        final currentBatch = entriesList.sublist(i, end);
-
-        final batchResults = await Future.wait(currentBatch.map((entry) async {
-          final file = entry.value;
-          final relPath = p.relative(file.path, from: workingDir).replaceAll(r'\', '/');
-          final ext = p.extension(file.path).replaceFirst('.', '').toLowerCase();
-          final isBinary = _binaryExtensions.contains(ext);
-
-          String contentBase64;
-          String encoding;
-
-          if (isBinary) {
-            final bytes = await file.readAsBytes();
-            contentBase64 = base64Encode(bytes);
-            encoding = 'base64';
-          } else {
-            try {
-              final str = await file.readAsString();
-              contentBase64 = base64Encode(utf8.encode(str));
-              encoding = 'base64';
-            } catch (_) {
-              final bytes = await file.readAsBytes();
-              contentBase64 = base64Encode(bytes);
-              encoding = 'base64';
+          if (treeFetchRes.statusCode == 200) {
+            final treeData = jsonDecode(treeFetchRes.body);
+            if (treeData['tree'] is List) {
+              for (final item in treeData['tree']) {
+                if (item['type'] == 'blob' && item['path'] is String && item['sha'] is String) {
+                  existingRemoteBlobs[item['path'] as String] = item['sha'] as String;
+                }
+              }
             }
           }
-
-          final blobRes = await client.post(
-            Uri.parse('$_baseUrl/repos/$owner/$repoName/git/blobs'),
-            headers: _headers(token),
-            body: jsonEncode({
-              'content': contentBase64,
-              'encoding': encoding,
-            }),
-          ).timeout(const Duration(seconds: 25));
-
-          if (blobRes.statusCode == 201) {
-            final blobSha = jsonDecode(blobRes.body)['sha'];
-            return {
-              'path': relPath,
-              'mode': '100644',
-              'type': 'blob',
-              'sha': blobSha,
-            };
-          }
-          return null;
-        }));
-
-        for (final item in batchResults) {
-          if (item != null) {
-            treeNodes.add(item);
-            uploadedCount++;
-          }
-        }
-
-        onLog('Uploaded $uploadedCount/${entriesList.length} files (parallel streams)...', LogLevel.info);
+        } catch (_) {}
       }
 
-      onLog('Assembling Git Tree with ${treeNodes.length} entries...', LogLevel.info);
+      final treeNodes = <Map<String, dynamic>>[];
+      final filesToUpload = <_LocalFileToUpload>[];
+
+      for (int i = 0; i < fileEntries.length; i++) {
+        final file = fileEntries[i];
+        final relPath = p.relative(file.path, from: workingDir).replaceAll(r'\', '/');
+        final bytes = await file.readAsBytes();
+        final localSha = _calculateGitBlobSha(bytes);
+
+        if (existingRemoteBlobs[relPath] == localSha) {
+          treeNodes.add({
+            'path': relPath,
+            'mode': '100644',
+            'type': 'blob',
+            'sha': localSha,
+          });
+        } else {
+          filesToUpload.add(_LocalFileToUpload(
+            file: file,
+            relPath: relPath,
+            bytes: bytes,
+            gitSha: localSha,
+          ));
+        }
+
+        if (i % 25 == 0) {
+          await Future.delayed(Duration.zero);
+        }
+      }
+
+      final skippedCount = treeNodes.length;
+      if (skippedCount > 0) {
+        onLog('$skippedCount file(s) matched remote Git SHAs (instant diff).', LogLevel.info);
+      }
+
+      if (filesToUpload.isNotEmpty) {
+        onLog('Streaming ${filesToUpload.length} file(s) across 16 parallel workers...', LogLevel.info);
+        int uploadedCounter = 0;
+
+        await _runSlidingPool<_LocalFileToUpload>(
+          items: filesToUpload,
+          concurrency: 16,
+          worker: (item) async {
+            final contentBase64 = base64Encode(item.bytes);
+            final blobRes = await client.post(
+              Uri.parse('$_baseUrl/repos/$owner/$repoName/git/blobs'),
+              headers: _headers(token),
+              body: jsonEncode({
+                'content': contentBase64,
+                'encoding': 'base64',
+              }),
+            ).timeout(const Duration(seconds: 30));
+
+            if (blobRes.statusCode == 201) {
+              final blobSha = jsonDecode(blobRes.body)['sha'];
+              treeNodes.add({
+                'path': item.relPath,
+                'mode': '100644',
+                'type': 'blob',
+                'sha': blobSha,
+              });
+            } else {
+              onLog('Blob error for ${item.relPath}: ${blobRes.body}', LogLevel.warning);
+            }
+
+            uploadedCounter++;
+            if (uploadedCounter % 15 == 0 || uploadedCounter == filesToUpload.length) {
+              onLog('Uploaded $uploadedCounter/${filesToUpload.length} files...', LogLevel.info);
+            }
+          },
+        );
+      }
+
+      onLog('Generating Git Tree with ${treeNodes.length} objects...', LogLevel.info);
       final treePayload = <String, dynamic>{
         'tree': treeNodes,
       };
@@ -331,7 +404,7 @@ class GitHubService {
         Uri.parse('$_baseUrl/repos/$owner/$repoName/git/trees'),
         headers: _headers(token),
         body: jsonEncode(treePayload),
-      ).timeout(const Duration(seconds: 20));
+      ).timeout(const Duration(seconds: 25));
 
       if (treeRes.statusCode != 201) {
         onLog('Failed to create Git Tree: ${treeRes.body}', LogLevel.error);
@@ -355,7 +428,7 @@ class GitHubService {
         Uri.parse('$_baseUrl/repos/$owner/$repoName/git/commits'),
         headers: _headers(token),
         body: jsonEncode(commitPayload),
-      ).timeout(const Duration(seconds: 20));
+      ).timeout(const Duration(seconds: 25));
 
       if (commitRes.statusCode != 201) {
         onLog('Failed to create commit: ${commitRes.body}', LogLevel.error);
