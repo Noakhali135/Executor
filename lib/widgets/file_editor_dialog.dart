@@ -23,6 +23,9 @@ class FileEditorDialog extends StatefulWidget {
 
 class _FileEditorDialogState extends State<FileEditorDialog> {
   final TextEditingController _codeController = TextEditingController();
+  final UndoHistoryController _undoController = UndoHistoryController();
+
+  String _savedContent = '';
   bool _isLoading = true;
   bool _isSaving = false;
   bool _isDirty = false;
@@ -56,18 +59,23 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
   void dispose() {
     _codeController.removeListener(_onTextChanged);
     _codeController.dispose();
+    _undoController.dispose();
     super.dispose();
   }
 
   void _onTextChanged() {
     final text = _codeController.text;
     final lines = text.isEmpty ? 1 : text.split('\n').length;
-    if (mounted) {
-      setState(() {
-        _isDirty = true;
-        _lineCount = lines;
-        _charCount = text.length;
-      });
+    final hasContentChanged = (text != _savedContent);
+
+    if (hasContentChanged != _isDirty || lines != _lineCount || text.length != _charCount) {
+      if (mounted) {
+        setState(() {
+          _isDirty = hasContentChanged;
+          _lineCount = lines;
+          _charCount = text.length;
+        });
+      }
     }
   }
 
@@ -106,6 +114,7 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
       final text = await file.readAsString();
       if (mounted) {
         setState(() {
+          _savedContent = text;
           _codeController.text = text;
           _isDirty = false;
           _isLoading = false;
@@ -119,6 +128,7 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
         final text = String.fromCharCodes(bytes);
         if (mounted) {
           setState(() {
+            _savedContent = text;
             _codeController.text = text;
             _isDirty = false;
             _isLoading = false;
@@ -147,6 +157,7 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
       final len = await file.length();
       if (mounted) {
         setState(() {
+          _savedContent = _codeController.text;
           _isSaving = false;
           _isDirty = false;
           _fileSizeBytes = len;
@@ -373,6 +384,7 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
                                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                                   child: TextField(
                                     controller: _codeController,
+                                    undoController: _undoController,
                                     maxLines: null,
                                     expands: true,
                                     style: const TextStyle(
@@ -390,7 +402,7 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
             ),
             if (!_isBinary && !_isImage)
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: const BoxDecoration(
                   color: Color(0xFF080C16),
                   border: Border(top: BorderSide(color: Color(0xFF1E293B))),
@@ -398,9 +410,49 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      'Lines: $_lineCount | Chars: $_charCount',
-                      style: const TextStyle(color: Color(0xFF64748B), fontFamily: 'monospace', fontSize: 11),
+                    Row(
+                      children: [
+                        Text(
+                          'Lines: $_lineCount | Chars: $_charCount',
+                          style: const TextStyle(color: Color(0xFF64748B), fontFamily: 'monospace', fontSize: 11),
+                        ),
+                        const SizedBox(width: 10),
+                        ValueListenableBuilder<UndoHistoryValue>(
+                          valueListenable: _undoController,
+                          builder: (context, value, child) {
+                            return Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                InkWell(
+                                  onTap: value.canUndo ? () => _undoController.undo() : null,
+                                  borderRadius: BorderRadius.circular(4),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                    child: Icon(
+                                      Icons.undo_rounded,
+                                      size: 16,
+                                      color: value.canUndo ? const Color(0xFF818CF8) : const Color(0xFF334155),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                InkWell(
+                                  onTap: value.canRedo ? () => _undoController.redo() : null,
+                                  borderRadius: BorderRadius.circular(4),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                    child: Icon(
+                                      Icons.redo_rounded,
+                                      size: 16,
+                                      color: value.canRedo ? const Color(0xFF818CF8) : const Color(0xFF334155),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ],
                     ),
                     Text(
                       _isDirty ? '● Unsaved' : 'Saved',
