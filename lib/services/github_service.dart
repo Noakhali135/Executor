@@ -5,6 +5,18 @@ import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/command_action.dart';
 
+class TokenVerifyResult {
+  final bool success;
+  final String? username;
+  final String? errorMessage;
+
+  const TokenVerifyResult({
+    required this.success,
+    this.username,
+    this.errorMessage,
+  });
+}
+
 class GitHubService {
   static const String _keyToken = 'github_pat_token';
   static const String _keyUsername = 'github_pat_username';
@@ -45,26 +57,55 @@ class GitHubService {
   }
 
   static Map<String, String> _headers(String token) {
+    final clean = token.trim();
     return {
-      'Authorization': 'Bearer $token',
+      'Authorization': 'Bearer $clean',
       'Accept': 'application/vnd.github+json',
+      'User-Agent': 'DevRunner-Mobile-App',
       'X-GitHub-Api-Version': '2022-11-28',
       'Content-Type': 'application/json',
     };
   }
 
-  static Future<String?> verifyToken(String token) async {
+  static Future<TokenVerifyResult> verifyToken(String rawToken) async {
+    final token = rawToken.trim();
+    if (token.isEmpty) {
+      return const TokenVerifyResult(success: false, errorMessage: 'Token cannot be empty');
+    }
+
     try {
       final res = await http.get(
         Uri.parse('$_baseUrl/user'),
         headers: _headers(token),
       );
+
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
-        return data['login'] as String?;
+        return TokenVerifyResult(
+          success: true,
+          username: data['login'] as String?,
+        );
+      } else {
+        try {
+          final errBody = jsonDecode(res.body);
+          final msg = errBody['message'] ?? 'HTTP ${res.statusCode}';
+          return TokenVerifyResult(
+            success: false,
+            errorMessage: '$msg (${res.statusCode})',
+          );
+        } catch (_) {
+          return TokenVerifyResult(
+            success: false,
+            errorMessage: 'GitHub returned HTTP ${res.statusCode}',
+          );
+        }
       }
-    } catch (_) {}
-    return null;
+    } catch (e) {
+      return TokenVerifyResult(
+        success: false,
+        errorMessage: 'Network error connecting to GitHub: $e',
+      );
+    }
   }
 
   static Future<List<Map<String, dynamic>>> getUserRepos(String token) async {
@@ -96,7 +137,7 @@ class GitHubService {
       Uri.parse('$_baseUrl/user/repos'),
       headers: _headers(token),
       body: jsonEncode({
-        'name': repoName,
+        'name': repoName.trim(),
         'private': isPrivate,
         'description': description,
         'auto_init': true,

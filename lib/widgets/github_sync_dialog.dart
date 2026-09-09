@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/command_action.dart';
 import '../services/github_service.dart';
 
@@ -80,6 +81,13 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     }
   }
 
+  Future<void> _handlePasteToken() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (data != null && data.text != null) {
+      _tokenController.text = data.text!.trim();
+    }
+  }
+
   Future<void> _verifyAndSaveToken() async {
     final input = _tokenController.text.trim();
     if (input.isEmpty) return;
@@ -88,13 +96,13 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       _isVerifying = true;
     });
 
-    final login = await GitHubService.verifyToken(input);
-    if (login != null) {
-      await GitHubService.saveToken(input, login);
+    final result = await GitHubService.verifyToken(input);
+    if (result.success && result.username != null) {
+      await GitHubService.saveToken(input, result.username!);
       if (mounted) {
         setState(() {
           _savedToken = input;
-          _username = login;
+          _username = result.username;
           _isVerifying = false;
         });
         _fetchRepos(input);
@@ -105,9 +113,11 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
           _isVerifying = false;
         });
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Invalid token. Make sure it has "repo" scope.'),
-            backgroundColor: Color(0xFFDC2626),
+          SnackBar(
+            content: Text(result.errorMessage ?? 'Token verification failed'),
+            backgroundColor: const Color(0xFFDC2626),
+            duration: const Duration(seconds: 4),
+            behavior: SnackBarBehavior.floating,
           ),
         );
       }
@@ -130,7 +140,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     final targetRepo = _isCreateNew ? _newRepoController.text.trim() : _selectedRepo;
     if (targetRepo == null || targetRepo.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select or specify a repository')),
+        const SnackBar(content: Text('Please select or enter a repository name')),
       );
       return;
     }
@@ -153,7 +163,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
         description: 'Created with DevRunner Mobile',
       );
       if (!created) {
-        widget.onLog('Failed to create repository. It might already exist.', LogLevel.warning);
+        widget.onLog('Repository creation note: Repo might already exist, proceeding...', LogLevel.warning);
       } else {
         widget.onLog('Repository "$targetRepo" created successfully.', LogLevel.success);
       }
@@ -227,7 +237,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
         ),
         const SizedBox(height: 4),
         const Text(
-          'Provide a Personal Access Token (PAT) with "repo" scope. This token will remain securely saved on your device.',
+          'Use a Personal Access Token (PAT). Classic Token with "repo" scope is recommended.',
           style: TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
         ),
         const SizedBox(height: 12),
@@ -240,6 +250,11 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
             hintStyle: const TextStyle(color: Color(0xFF475569)),
             filled: true,
             fillColor: const Color(0xFF080C16),
+            suffixIcon: IconButton(
+              icon: const Icon(Icons.paste_rounded, color: Color(0xFF818CF8), size: 18),
+              onPressed: _handlePasteToken,
+              tooltip: 'Paste Token',
+            ),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(10),
               borderSide: const BorderSide(color: Color(0xFF1E293B)),
