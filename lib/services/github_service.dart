@@ -24,12 +24,14 @@ class _LocalFileToUpload {
   final String relPath;
   final Uint8List bytes;
   final String gitSha;
+  final bool isNew;
 
   const _LocalFileToUpload({
     required this.file,
     required this.relPath,
     required this.bytes,
     required this.gitSha,
+    required this.isNew,
   });
 }
 
@@ -69,6 +71,18 @@ class GitHubService {
       'X-GitHub-Api-Version': '2022-11-28',
       'Content-Type': 'application/json',
     };
+  }
+
+  static String _formatBytes(int bytes) {
+    if (bytes < 1024) {
+      return '$bytes B';
+    } else if (bytes < 1024 * 1024) {
+      final kb = bytes / 1024.0;
+      return '${kb.toStringAsFixed(1)} KB';
+    } else {
+      final mb = bytes / (1024.0 * 1024.0);
+      return '${mb.toStringAsFixed(2)} MB';
+    }
   }
 
   static String _calculateGitBlobSha(Uint8List bytes) {
@@ -214,6 +228,8 @@ class GitHubService {
     required Function(String message, LogLevel level) onLog,
   }) async {
     final client = http.Client();
+    final stopwatch = Stopwatch()..start();
+
     try {
       onLog('Connecting to GitHub API as @$owner...', LogLevel.info);
 
@@ -260,7 +276,7 @@ class GitHubService {
         return;
       }
 
-      onLog('Scanning ${fileEntries.length} file(s)...', LogLevel.info);
+      onLog('Scanned ${fileEntries.length} file(s) in workspace.', LogLevel.info);
 
       String? parentCommitSha;
       String? baseTreeSha;
@@ -321,26 +337,48 @@ class GitHubService {
 
       final treeNodes = <Map<String, dynamic>>[];
       final filesToUpload = <_LocalFileToUpload>[];
+      int totalScannedBytes = 0;
+      int totalUploadBytes = 0;
+      int newCount = 0;
+      int modifiedCount = 0;
+      int unchangedCount = 0;
 
       for (int i = 0; i < fileEntries.length; i++) {
         final file = fileEntries[i];
         final relPath = p.relative(file.path, from: workingDir).replaceAll(r'\', '/');
         final bytes = await file.readAsBytes();
         final localSha = _calculateGitBlobSha(bytes);
+        totalScannedBytes += bytes.length;
 
-        if (existingRemoteBlobs[relPath] == localSha) {
-          treeNodes.add({
-            'path': relPath,
-            'mode': '100644',
-            'type': 'blob',
-            'sha': localSha,
-          });
+        if (existingRemoteBlobs.containsKey(relPath)) {
+          if (existingRemoteBlobs[relPath] == localSha) {
+            unchangedCount++;
+            treeNodes.add({
+              'path': relPath,
+              'mode': '100644',
+              'type': 'blob',
+              'sha': localSha,
+            });
+          } else {
+            modifiedCount++;
+            totalUploadBytes += bytes.length;
+            filesToUpload.add(_LocalFileToUpload(
+              file: file,
+              relPath: relPath,
+              bytes: bytes,
+              gitSha: localSha,
+              isNew: false,
+            ));
+          }
         } else {
+          newCount++;
+          totalUploadBytes += bytes.length;
           filesToUpload.add(_LocalFileToUpload(
             file: file,
             relPath: relPath,
             bytes: bytes,
             gitSha: localSha,
+            isNew: true,
           ));
         }
 
@@ -349,48 +387,57 @@ class GitHubService {
         }
       }
 
-      final skippedCount = treeNodes.length;
-      if (skippedCount > 0) {
-        onLog('$skippedCount file(s) matched remote Git SHAs (instant diff).', LogLevel.info);
+      final summaryDiff = [
+        if (newCount > 0) '$newCount new',
+        if (modifiedCount > 0) '$modifiedCount modified',
+        if (unchangedCount > 0) '$unchangedCount unchanged',
+      ].join(', ');
+
+      onLog('Diff analysis: $summaryDiff', LogLevel.info);
+      onLog('Payload: ${filesToUpload.length} file(s) to upload (${_formatBytes(totalUploadBytes)}) [Total workspace: ${_formatBytes(totalScannedBytes)}]', LogLevel.info);
+
+      if (filesToUpload.isEmpty) {
+        onLog('[SUCCESS] Everything is up-to-date! All $unchangedCount file(s) already match GitHub.', LogLevel.success);
+        return;
       }
 
-      if (filesToUpload.isNotEmpty) {
-        onLog('Streaming ${filesToUpload.length} file(s) across 16 parallel workers...', LogLevel.info);
-        int uploadedCounter = 0;
+      onLog('Streaming ${filesToUpload.length} file(s) across 16 parallel workers...', LogLevel.info);
+      int uploadedCounter = 0;
+      int uploadedBytesCounter = 0;
 
-        await _runSlidingPool<_LocalFileToUpload>(
-          items: filesToUpload,
-          concurrency: 16,
-          worker: (item) async {
-            final contentBase64 = base64Encode(item.bytes);
-            final blobRes = await client.post(
-              Uri.parse('$_baseUrl/repos/$owner/$repoName/git/blobs'),
-              headers: _headers(token),
-              body: jsonEncode({
-                'content': contentBase64,
-                'encoding': 'base64',
-              }),
-            ).timeout(const Duration(seconds: 30));
+      await _runSlidingPool<_LocalFileToUpload>(
+        items: filesToUpload,
+        concurrency: 16,
+        worker: (item) async {
+          final contentBase64 = base64Encode(item.bytes);
+          final blobRes = await client.post(
+            Uri.parse('$_baseUrl/repos/$owner/$repoName/git/blobs'),
+            headers: _headers(token),
+            body: jsonEncode({
+              'content': contentBase64,
+              'encoding': 'base64',
+            }),
+          ).timeout(const Duration(seconds: 30));
 
-            if (blobRes.statusCode == 201) {
-              final blobSha = jsonDecode(blobRes.body)['sha'];
-              treeNodes.add({
-                'path': item.relPath,
-                'mode': '100644',
-                'type': 'blob',
-                'sha': blobSha,
-              });
-            } else {
-              onLog('Blob error for ${item.relPath}: ${blobRes.body}', LogLevel.warning);
-            }
+          if (blobRes.statusCode == 201) {
+            final blobSha = jsonDecode(blobRes.body)['sha'];
+            treeNodes.add({
+              'path': item.relPath,
+              'mode': '100644',
+              'type': 'blob',
+              'sha': blobSha,
+            });
+            uploadedBytesCounter += item.bytes.length;
+          } else {
+            onLog('Blob error for ${item.relPath}: ${blobRes.body}', LogLevel.warning);
+          }
 
-            uploadedCounter++;
-            if (uploadedCounter % 15 == 0 || uploadedCounter == filesToUpload.length) {
-              onLog('Uploaded $uploadedCounter/${filesToUpload.length} files...', LogLevel.info);
-            }
-          },
-        );
-      }
+          uploadedCounter++;
+          if (uploadedCounter % 15 == 0 || uploadedCounter == filesToUpload.length) {
+            onLog('Uploaded $uploadedCounter/${filesToUpload.length} files (${_formatBytes(uploadedBytesCounter)} / ${_formatBytes(totalUploadBytes)})...', LogLevel.info);
+          }
+        },
+      );
 
       onLog('Generating Git Tree with ${treeNodes.length} objects...', LogLevel.info);
       final treePayload = <String, dynamic>{
@@ -443,14 +490,21 @@ class GitHubService {
         headers: _headers(token),
       ).timeout(const Duration(seconds: 15));
 
+      final elapsedSeconds = stopwatch.elapsedMilliseconds / 1000.0;
+      final speedText = elapsedSeconds > 0
+          ? '${_formatBytes((totalUploadBytes / elapsedSeconds).round())}/s'
+          : 'N/A';
+
       if (checkRef.statusCode == 200) {
         final updateRefRes = await client.patch(
           Uri.parse('$_baseUrl/repos/$owner/$repoName/git/refs/heads/$branch'),
           headers: _headers(token),
           body: jsonEncode({'sha': newCommitSha, 'force': true}),
         ).timeout(const Duration(seconds: 15));
+
         if (updateRefRes.statusCode == 200) {
           onLog('[SUCCESS] Pushed commit $shortSha to branch "$branch"', LogLevel.success);
+          onLog('[PUSH STATS] $newCount new, $modifiedCount modified, $unchangedCount cached | ${_formatBytes(totalUploadBytes)} uploaded in ${elapsedSeconds.toStringAsFixed(1)}s ($speedText)', LogLevel.success);
           onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogLevel.success);
         } else {
           onLog('Failed to update branch reference: ${updateRefRes.body}', LogLevel.error);
@@ -464,8 +518,10 @@ class GitHubService {
             'sha': newCommitSha,
           }),
         ).timeout(const Duration(seconds: 15));
+
         if (createRefRes.statusCode == 201) {
           onLog('[SUCCESS] Created new branch "$branch" with commit $shortSha', LogLevel.success);
+          onLog('[PUSH STATS] $newCount new, $modifiedCount modified, $unchangedCount cached | ${_formatBytes(totalUploadBytes)} uploaded in ${elapsedSeconds.toStringAsFixed(1)}s ($speedText)', LogLevel.success);
           onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogLevel.success);
         } else {
           onLog('Failed to create branch reference: ${createRefRes.body}', LogLevel.error);
