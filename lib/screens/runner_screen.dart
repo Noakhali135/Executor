@@ -4,6 +4,7 @@ import '../models/command_action.dart';
 import '../services/command_parser_service.dart';
 import '../services/file_execution_service.dart';
 import '../services/storage_service.dart';
+import '../widgets/directory_picker_dialog.dart';
 
 class RunnerScreen extends StatefulWidget {
   final String workingDir;
@@ -56,88 +57,18 @@ class _RunnerScreenState extends State<RunnerScreen> {
   }
 
   Future<void> _handleBrowse() async {
-    final picked = await StorageService.pickDirectory();
-    if (picked != null) {
-      widget.onDirectoryChanged(picked);
-      _addLog('Changed working directory to: $picked', LogLevel.info);
-    } else {
-      _showManualDirectoryDialog();
-    }
-  }
-
-  void _showManualDirectoryDialog() {
-    final controller = TextEditingController(text: widget.workingDir);
-    showDialog(
+    final selected = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF111827),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: Color(0xFF1E293B)),
-        ),
-        title: const Row(
-          children: [
-            Icon(Icons.folder_open, color: Color(0xFF818CF8)),
-            SizedBox(width: 8),
-            Text(
-              'Set Working Directory',
-              style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Enter the device absolute path for your project workspace:',
-              style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              style: const TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'monospace'),
-              decoration: InputDecoration(
-                filled: true,
-                fillColor: const Color(0xFF090D16),
-                hintText: '/storage/emulated/0/projects/app',
-                hintStyle: const TextStyle(color: Color(0xFF475569)),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: Color(0xFF1E293B)),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: Color(0xFF6366F1)),
-                ),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel', style: TextStyle(color: Color(0xFF94A3B8))),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF6366F1),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            ),
-            onPressed: () async {
-              final newPath = controller.text.trim();
-              if (newPath.isNotEmpty) {
-                await StorageService.saveDirectory(newPath);
-                widget.onDirectoryChanged(newPath);
-                _addLog('Working directory updated to: $newPath', LogLevel.info);
-              }
-              if (ctx.mounted) Navigator.pop(ctx);
-            },
-            child: const Text('Save Path', style: TextStyle(color: Colors.white)),
-          ),
-        ],
+      builder: (ctx) => DirectoryPickerDialog(
+        initialPath: widget.workingDir,
       ),
     );
+
+    if (selected != null && selected.isNotEmpty) {
+      await StorageService.saveDirectory(selected);
+      widget.onDirectoryChanged(selected);
+      _addLog('Changed working directory to: $selected', LogLevel.info);
+    }
   }
 
   Future<void> _handlePaste() async {
@@ -145,13 +76,15 @@ class _RunnerScreenState extends State<RunnerScreen> {
     if (data != null && data.text != null && data.text!.isNotEmpty) {
       widget.codeController.text = data.text!;
       _updateTextMetrics();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Pasted from clipboard'),
-          duration: Duration(milliseconds: 1000),
-          backgroundColor: Color(0xFF1E293B),
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Pasted from clipboard'),
+            duration: Duration(milliseconds: 1000),
+            backgroundColor: Color(0xFF1E293B),
+          ),
+        );
+      }
     }
   }
 
@@ -304,7 +237,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
             children: [
               Expanded(
                 child: GestureDetector(
-                  onTap: _showManualDirectoryDialog,
+                  onTap: _handleBrowse,
                   child: Container(
                     height: 44,
                     padding: const EdgeInsets.symmetric(horizontal: 12),

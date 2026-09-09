@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -9,10 +8,10 @@ class StorageService {
   static Future<String?> getSavedDirectory() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString(_keyWorkingDir);
-    if (saved != null && saved.isNotEmpty && Directory(saved).existsSync()) {
+    if (saved != null && saved.isNotEmpty) {
       return saved;
     }
-    return saved;
+    return null;
   }
 
   static Future<void> saveDirectory(String path) async {
@@ -22,29 +21,17 @@ class StorageService {
 
   static Future<bool> requestStoragePermissions() async {
     if (Platform.isAndroid) {
-      if (await Permission.manageExternalStorage.isGranted) {
-        return true;
-      }
-      final status = await Permission.manageExternalStorage.request();
-      if (status.isGranted) return true;
+      try {
+        if (await Permission.manageExternalStorage.isGranted) {
+          return true;
+        }
+        final status = await Permission.manageExternalStorage.request();
+        if (status.isGranted) return true;
 
-      final storageStatus = await Permission.storage.request();
-      return storageStatus.isGranted;
+        final storageStatus = await Permission.storage.request();
+        return storageStatus.isGranted;
+      } catch (_) {}
     }
     return true;
-  }
-
-  static Future<String?> pickDirectory() async {
-    await requestStoragePermissions();
-    try {
-      final selectedPath = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: 'Select Project Working Directory',
-      );
-      if (selectedPath != null && selectedPath.isNotEmpty) {
-        await saveDirectory(selectedPath);
-        return selectedPath;
-      }
-    } catch (_) {}
-    return null;
   }
 }
