@@ -5,6 +5,7 @@ import '../services/command_parser_service.dart';
 import '../services/file_execution_service.dart';
 import '../services/storage_service.dart';
 import '../widgets/directory_picker_dialog.dart';
+import '../widgets/github_sync_dialog.dart';
 
 class RunnerScreen extends StatefulWidget {
   final String workingDir;
@@ -71,6 +72,16 @@ class _RunnerScreenState extends State<RunnerScreen> {
     }
   }
 
+  void _handleOpenGitHubSync() {
+    showDialog(
+      context: context,
+      builder: (ctx) => GitHubSyncDialog(
+        workingDir: widget.workingDir,
+        onLog: _addLog,
+      ),
+    );
+  }
+
   Future<void> _handlePaste() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data != null && data.text != null && data.text!.isNotEmpty) {
@@ -125,6 +136,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
   }
 
   void _addLog(String msg, LogLevel level) {
+    if (!mounted) return;
     setState(() {
       _terminalLogs.add(TerminalLog(message: msg, level: level));
     });
@@ -254,11 +266,27 @@ class _RunnerScreenState extends State<RunnerScreen> {
                   ),
                 ],
               ),
-              Text(
-                'Local storage',
-                style: TextStyle(
-                  color: Colors.white.withOpacity(0.35),
-                  fontSize: 10.5,
+              InkWell(
+                onTap: _handleOpenGitHubSync,
+                borderRadius: BorderRadius.circular(6),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF6366F1).withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: const Color(0xFF6366F1)),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.cloud_upload_rounded, size: 12, color: Color(0xFF818CF8)),
+                      SizedBox(width: 4),
+                      Text(
+                        'GitHub',
+                        style: TextStyle(color: Color(0xFFCBD5E1), fontSize: 10.5, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ],
