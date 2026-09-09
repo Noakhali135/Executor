@@ -38,6 +38,7 @@ class _LocalFileToUpload {
 class GitHubService {
   static const String _keyToken = 'github_pat_token';
   static const String _keyUsername = 'github_pat_username';
+  static const String _keySelectedRepo = 'github_last_selected_repo';
   static const String _baseUrl = 'https://api.github.com';
 
   static Future<String?> getToken() async {
@@ -50,6 +51,16 @@ class GitHubService {
     return prefs.getString(_keyUsername);
   }
 
+  static Future<String?> getSavedRepo() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_keySelectedRepo);
+  }
+
+  static Future<void> saveRepo(String repoName) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keySelectedRepo, repoName.trim());
+  }
+
   static Future<void> saveToken(String token, String username) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyToken, token.trim());
@@ -60,6 +71,7 @@ class GitHubService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_keyToken);
     await prefs.remove(_keyUsername);
+    await prefs.remove(_keySelectedRepo);
   }
 
   static Map<String, String> _headers(String token) {
@@ -146,7 +158,7 @@ class GitHubService {
     final client = http.Client();
     try {
       final res = await client.get(
-        Uri.parse('$_baseUrl/user/repos?per_page=50&sort=updated'),
+        Uri.parse('$_baseUrl/user/repos?per_page=100&sort=updated'),
         headers: _headers(token),
       ).timeout(const Duration(seconds: 15));
       if (res.statusCode == 200) {

@@ -56,26 +56,32 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
   Future<void> _loadAuthStatus() async {
     final token = await GitHubService.getToken();
     final user = await GitHubService.getCachedUsername();
+    final savedRepo = await GitHubService.getSavedRepo();
+
     if (token != null && token.isNotEmpty && user != null) {
       setState(() {
         _savedToken = token;
         _username = user;
+        _selectedRepo = savedRepo;
       });
-      _fetchRepos(token);
+      _fetchRepos(token, preferredRepo: savedRepo);
     }
   }
 
-  Future<void> _fetchRepos(String token) async {
+  Future<void> _fetchRepos(String token, {String? preferredRepo}) async {
     setState(() {
       _isLoadingRepos = true;
     });
+
     final repos = await GitHubService.getUserRepos(token);
+
     if (mounted) {
+      final target = preferredRepo ?? _selectedRepo;
+      final bool exists = target != null && repos.any((r) => r['name'] == target);
+
       setState(() {
         _userRepos = repos;
-        if (repos.isNotEmpty) {
-          _selectedRepo = repos.first['name'];
-        }
+        _selectedRepo = exists ? target : null;
         _isLoadingRepos = false;
       });
     }
@@ -99,13 +105,15 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     final result = await GitHubService.verifyToken(input);
     if (result.success && result.username != null) {
       await GitHubService.saveToken(input, result.username!);
+      final savedRepo = await GitHubService.getSavedRepo();
       if (mounted) {
         setState(() {
           _savedToken = input;
           _username = result.username;
           _isVerifying = false;
+          _selectedRepo = savedRepo;
         });
-        _fetchRepos(input);
+        _fetchRepos(input, preferredRepo: savedRepo);
       }
     } else {
       if (mounted) {
@@ -140,7 +148,11 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     final targetRepo = _isCreateNew ? _newRepoController.text.trim() : _selectedRepo;
     if (targetRepo == null || targetRepo.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select or enter a repository name')),
+        const SnackBar(
+          content: Text('Please select or create a repository first'),
+          backgroundColor: Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+        ),
       );
       return;
     }
@@ -167,6 +179,9 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       } else {
         widget.onLog('Repository "$targetRepo" created successfully.', LogLevel.success);
       }
+      await GitHubService.saveRepo(targetRepo);
+    } else {
+      await GitHubService.saveRepo(targetRepo);
     }
 
     Navigator.pop(context);
@@ -370,7 +385,11 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
             const Center(child: Padding(padding: EdgeInsets.all(8.0), child: CircularProgressIndicator(strokeWidth: 2)))
           else
             DropdownButtonFormField<String>(
-              value: _userRepos.any((r) => r['name'] == _selectedRepo) ? _selectedRepo : null,
+              value: _selectedRepo,
+              hint: const Text(
+                'Select or create a repository first',
+                style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+              ),
               dropdownColor: const Color(0xFF111827),
               style: const TextStyle(color: Colors.white, fontSize: 12.5),
               decoration: InputDecoration(
@@ -386,7 +405,12 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
                   child: Text('${r['name']} ${r['private'] ? '🔒' : '🌐'}'),
                 );
               }).toList(),
-              onChanged: (val) => setState(() => _selectedRepo = val),
+              onChanged: (val) async {
+                setState(() => _selectedRepo = val);
+                if (val != null) {
+                  await GitHubService.saveRepo(val);
+                }
+              },
             ),
         ],
         const SizedBox(height: 10),
