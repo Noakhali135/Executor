@@ -9,7 +9,7 @@ import '../widgets/file_editor_dialog.dart';
 class ExplorerScreen extends StatefulWidget {
   final String workingDir;
   final Function(String relativePath, String content) onFileSelected;
-  final Function(String exportContent)? onBatchExportLoaded;
+  final Function(String exportContent, String label)? onBatchExportLoaded;
   final VoidCallback onRefreshRequested;
 
   const ExplorerScreen({
@@ -26,6 +26,7 @@ class ExplorerScreen extends StatefulWidget {
 
 class ExplorerScreenState extends State<ExplorerScreen> {
   final TextEditingController _searchController = TextEditingController();
+  final TextEditingController _createNameController = TextEditingController();
   List<TreeNode> _rootNodes = [];
   bool _isLoading = false;
   String _filterQuery = '';
@@ -57,6 +58,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
   @override
   void dispose() {
     _searchController.dispose();
+    _createNameController.dispose();
     super.dispose();
   }
 
@@ -84,9 +86,12 @@ class ExplorerScreenState extends State<ExplorerScreen> {
       _isLoading = true;
     });
 
+    final requestedDir = widget.workingDir;
     try {
-      final nodes = await _scanChildren(widget.workingDir, 0);
-      if (mounted) {
+      final nodes = await _scanChildren(requestedDir, 0);
+      // Discard results for a directory the user has already navigated away
+      // from, otherwise a slow scan can overwrite a newer tree.
+      if (mounted && widget.workingDir == requestedDir) {
         setState(() {
           _rootNodes = nodes;
           _isLoading = false;
@@ -206,24 +211,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
   }
 
   Future<void> _selectRecursively(String targetPath, bool isDir) async {
-    final normTarget = p.normalize(targetPath);
-    _selectedPaths.add(normTarget);
-
-    if (isDir) {
-      try {
-        final d = Directory(normTarget);
-        if (await d.exists()) {
-          final subEntities = await d.list(recursive: true, followLinks: false).toList();
-          for (final entity in subEntities) {
-            final name = p.basename(entity.path);
-            if (!name.startsWith('.')) {
-              _selectedPaths.add(p.normalize(entity.path));
-            }
-          }
-        }
-      } catch (_) {}
-    }
-
+    await _collectRecursive(targetPath, isDir, _selectedPaths);
     if (mounted) setState(() {});
   }
 
@@ -237,13 +225,43 @@ class ExplorerScreenState extends State<ExplorerScreen> {
     if (mounted) setState(() {});
   }
 
+  /// Selects every node with a single tree walk and a single rebuild.
+  ///
+  /// The previous implementation awaited a full recursive directory listing
+  /// per root entry and called setState for each one, which froze the UI on
+  /// large workspaces.
   Future<void> _selectAll() async {
     setState(() {
       _isSelectionMode = true;
     });
+
+    final collected = <String>{};
     for (final node in _rootNodes) {
-      await _selectRecursively(node.fullPath, node.isDirectory);
+      await _collectRecursive(node.fullPath, node.isDirectory, collected);
     }
+
+    if (!mounted) return;
+    setState(() {
+      _selectedPaths
+        ..clear()
+        ..addAll(collected);
+    });
+  }
+
+  Future<void> _collectRecursive(String targetPath, bool isDir, Set<String> into) async {
+    final normTarget = p.normalize(targetPath);
+    into.add(normTarget);
+    if (!isDir) return;
+    try {
+      final d = Directory(normTarget);
+      if (await d.exists()) {
+        await for (final entity in d.list(recursive: true, followLinks: false)) {
+          if (!p.basename(entity.path).startsWith('.')) {
+            into.add(p.normalize(entity.path));
+          }
+        }
+      }
+    } catch (_) {}
   }
 
   void _clearSelection() {
@@ -336,7 +354,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
             TextButton.icon(
               onPressed: () {
                 Navigator.pop(ctx);
-                widget.onBatchExportLoaded!(exportText);
+                widget.onBatchExportLoaded!(exportText, '${_selectedPaths.length} exported file(s)');
                 _clearSelection();
               },
               icon: const Icon(Icons.send_rounded, size: 14),
@@ -437,7 +455,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
   }
 
   void _showCreateDialog() {
-    final nameController = TextEditingController();
+    _createNameController.clear();
     bool isFolder = false;
 
     showDialog(
@@ -462,6 +480,8 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                     label: const Text('File'),
                     selected: !isFolder,
                     selectedColor: const Color(0xFF6366F1),
+                    // onSelected reports the chip's *new* selected state, so
+                    // "File" being selected means isFolder must be false.
                     onSelected: (val) => setDialogState(() => isFolder = !val),
                   ),
                   const SizedBox(width: 8),
@@ -475,7 +495,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
               ),
               const SizedBox(height: 10),
               TextField(
-                controller: nameController,
+                controller: _createNameController,
                 autofocus: true,
                 style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 12.5),
                 decoration: InputDecoration(
@@ -502,7 +522,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
               ),
               onPressed: () async {
-                final name = nameController.text.trim();
+                final name = _createNameController.text.trim();
                 if (name.isNotEmpty) {
                   final target = p.join(widget.workingDir, name);
                   if (isFolder) {
@@ -803,7 +823,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
       onTap: () => _handleFileTap(node),
       onLongPress: () => _toggleNodeSelection(node),
       child: Container(
-        color: isSelected ? const Color(0xFF6366F1).withOpacity(0.16) : Colors.transparent,
+        color: isSelected ? const Color(0xFF6366F1).withValues(alpha: 0.16) : Colors.transparent,
         padding: EdgeInsets.only(
           left: 10.0 + (node.depth * indentSize),
           right: 10.0,

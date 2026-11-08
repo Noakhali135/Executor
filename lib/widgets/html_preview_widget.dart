@@ -3,7 +3,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:webview_flutter/webview_flutter.dart';
+import '../services/path_guard.dart';
 
+/// Renders an HTML file in a WebView.
+///
+/// The page is served from a loopback-only HTTP server so that relative
+/// `./style.css` / `./app.js` references resolve. That server is deliberately
+/// locked down:
+///
+///  * bound to `InternetAddress.loopbackIPv4` only (never 0.0.0.0),
+///  * every request must carry a loopback `Host` header, which defeats DNS
+///    rebinding attacks from other apps / browsers on the device,
+///  * `..` segments and any path resolving outside the file's directory are
+///    rejected with 403,
+///  * no `Access-Control-Allow-Origin` wildcard is sent,
+///  * unsaved editor content is served for the entry document.
 class HtmlPreviewWidget extends StatefulWidget {
   final String htmlContent;
   final String baseDir;
@@ -39,6 +53,19 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
       ..setBackgroundColor(const Color(0xFF070B14))
       ..setNavigationDelegate(
         NavigationDelegate(
+          // Block navigation away from the loopback preview (e.g. a link in the
+          // previewed page silently replacing the app view).
+          onNavigationRequest: (NavigationRequest request) {
+            final uri = Uri.tryParse(request.url);
+            if (uri == null) return NavigationDecision.prevent;
+            if (uri.scheme == 'http' && _isLoopbackHost(uri.host)) {
+              return NavigationDecision.navigate;
+            }
+            if (uri.scheme == 'about' || uri.scheme == 'data') {
+              return NavigationDecision.navigate;
+            }
+            return NavigationDecision.prevent;
+          },
           onPageStarted: (String url) {
             if (mounted) setState(() => _isLoadingWeb = true);
           },
@@ -52,43 +79,99 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
       );
   }
 
+  static bool _isLoopbackHost(String host) =>
+      host == '127.0.0.1' || host == 'localhost' || host == '::1';
+
+  bool _hasLoopbackHostHeader(HttpRequest request) {
+    final host = request.headers.value(HttpHeaders.hostHeader);
+    if (host == null) return false;
+    final hostOnly = host.startsWith('[')
+        ? host.substring(0, host.indexOf(']') + 1)
+        : host.split(':').first;
+    return _isLoopbackHost(hostOnly.replaceAll('[', '').replaceAll(']', ''));
+  }
+
   Future<void> _startLocalServerAndLoad() async {
     try {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       _localServer = server;
       _serverPort = server.port;
 
+      final root = PathGuard.normalizeRoot(widget.baseDir);
+
       server.listen((HttpRequest request) async {
-        final rawPath = Uri.decodeComponent(request.uri.path.replaceFirst(RegExp(r'^/+'), ''));
-        final targetPath = rawPath.isEmpty
-            ? p.join(widget.baseDir, widget.fileName)
-            : p.join(widget.baseDir, rawPath);
+        try {
+          // Reject requests whose Host header is not loopback (DNS rebinding).
+          if (!_hasLoopbackHostHeader(request)) {
+            request.response.statusCode = HttpStatus.forbidden;
+            request.response.write('Forbidden');
+            await request.response.close();
+            return;
+          }
 
-        final file = File(targetPath);
-        if (await file.exists()) {
-          final ext = p.extension(file.path).toLowerCase();
-          String contentType = 'application/octet-stream';
-          if (ext == '.html' || ext == '.htm') contentType = 'text/html; charset=utf-8';
-          else if (ext == '.css') contentType = 'text/css; charset=utf-8';
-          else if (ext == '.js') contentType = 'application/javascript; charset=utf-8';
-          else if (ext == '.json') contentType = 'application/json; charset=utf-8';
-          else if (ext == '.png') contentType = 'image/png';
-          else if (ext == '.jpg' || ext == '.jpeg') contentType = 'image/jpeg';
-          else if (ext == '.gif') contentType = 'image/gif';
-          else if (ext == '.svg') contentType = 'image/svg+xml';
-          else if (ext == '.webp') contentType = 'image/webp';
+          if (request.method != 'GET' && request.method != 'HEAD') {
+            request.response.statusCode = HttpStatus.methodNotAllowed;
+            await request.response.close();
+            return;
+          }
 
-          request.response.headers.set(HttpHeaders.contentTypeHeader, contentType);
-          request.response.headers.set('Access-Control-Allow-Origin', '*');
-          await file.openRead().pipe(request.response);
-        } else {
-          request.response.statusCode = HttpStatus.notFound;
-          request.response.write('Not found: $rawPath');
-          await request.response.close();
+          final rawPath = Uri.decodeComponent(
+            request.uri.path.replaceFirst(RegExp(r'^/+'), ''),
+          );
+
+          // Traversal attempts are refused outright.
+          if (PathGuard.containsTraversal(rawPath)) {
+            request.response.statusCode = HttpStatus.forbidden;
+            request.response.write('Forbidden: path traversal');
+            await request.response.close();
+            return;
+          }
+
+          final isEntryDocument = rawPath.isEmpty || rawPath == widget.fileName;
+
+          // Serve the live editor buffer for the entry document so unsaved
+          // edits are visible in the preview.
+          if (isEntryDocument) {
+            request.response.headers.set(
+              HttpHeaders.contentTypeHeader,
+              'text/html; charset=utf-8',
+            );
+            request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+            request.response.write(widget.htmlContent);
+            await request.response.close();
+            return;
+          }
+
+          final targetPath = p.normalize(p.join(root, rawPath));
+          if (!PathGuard.isInside(root, targetPath)) {
+            request.response.statusCode = HttpStatus.forbidden;
+            request.response.write('Forbidden: outside preview directory');
+            await request.response.close();
+            return;
+          }
+
+          final file = File(targetPath);
+          if (await file.exists()) {
+            request.response.headers.set(
+              HttpHeaders.contentTypeHeader,
+              _contentTypeFor(file.path),
+            );
+            request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+            await file.openRead().pipe(request.response);
+          } else {
+            request.response.statusCode = HttpStatus.notFound;
+            request.response.write('Not found');
+            await request.response.close();
+          }
+        } catch (_) {
+          try {
+            request.response.statusCode = HttpStatus.internalServerError;
+            await request.response.close();
+          } catch (_) {}
         }
       });
 
-      final localUrl = 'http://127.0.0.1:${server.port}/${widget.fileName}';
+      final localUrl = 'http://127.0.0.1:${server.port}/';
       await _webViewController.loadRequest(Uri.parse(localUrl));
       if (mounted) setState(() {});
     } catch (_) {
@@ -97,10 +180,47 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
     }
   }
 
+  static String _contentTypeFor(String path) {
+    switch (p.extension(path).toLowerCase()) {
+      case '.html':
+      case '.htm':
+        return 'text/html; charset=utf-8';
+      case '.css':
+        return 'text/css; charset=utf-8';
+      case '.js':
+      case '.mjs':
+        return 'application/javascript; charset=utf-8';
+      case '.json':
+        return 'application/json; charset=utf-8';
+      case '.png':
+        return 'image/png';
+      case '.jpg':
+      case '.jpeg':
+        return 'image/jpeg';
+      case '.gif':
+        return 'image/gif';
+      case '.svg':
+        return 'image/svg+xml';
+      case '.webp':
+        return 'image/webp';
+      case '.ico':
+        return 'image/x-icon';
+      case '.woff':
+        return 'font/woff';
+      case '.woff2':
+        return 'font/woff2';
+      case '.txt':
+      case '.md':
+        return 'text/plain; charset=utf-8';
+      default:
+        return 'application/octet-stream';
+    }
+  }
+
   @override
   void didUpdateWidget(covariant HtmlPreviewWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.htmlContent != widget.htmlContent || oldWidget.fileName != widget.fileName) {
+    if (oldWidget.htmlContent != widget.htmlContent) {
       _reloadPage();
     }
   }
@@ -113,7 +233,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
 
   void _copyServerUrl() {
     if (_serverPort == null) return;
-    final url = 'http://127.0.0.1:$_serverPort/${widget.fileName}';
+    final url = 'http://127.0.0.1:$_serverPort/';
     Clipboard.setData(ClipboardData(text: url));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(

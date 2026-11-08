@@ -18,6 +18,7 @@ class DirectoryPickerDialog extends StatefulWidget {
 class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
   late String _currentPath;
   final TextEditingController _pathInputController = TextEditingController();
+  final TextEditingController _newFolderController = TextEditingController();
   List<Directory> _subDirectories = [];
   bool _isLoading = false;
 
@@ -51,6 +52,7 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
   @override
   void dispose() {
     _pathInputController.dispose();
+    _newFolderController.dispose();
     super.dispose();
   }
 
@@ -103,7 +105,7 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
   }
 
   void _promptCreateFolder() {
-    final folderController = TextEditingController();
+    _newFolderController.clear();
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -114,7 +116,7 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
         ),
         title: const Text('New Folder', style: TextStyle(color: Colors.white, fontSize: 16)),
         content: TextField(
-          controller: folderController,
+          controller: _newFolderController,
           autofocus: true,
           style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 13),
           decoration: InputDecoration(
@@ -139,7 +141,7 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),
             onPressed: () async {
-              final name = folderController.text.trim();
+              final name = _newFolderController.text.trim();
               if (name.isNotEmpty) {
                 final newDir = Directory(p.join(_currentPath, name));
                 if (!await newDir.exists()) {

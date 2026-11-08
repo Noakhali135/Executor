@@ -1,47 +1,19 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as p;
+import 'file_types.dart';
 
 class ExportService {
-  static final String _tagAction = '[' + 'ACTION]: CREATE_FILE';
+  static final String _tagActionCreate = '[' + 'ACTION]: CREATE_FILE';
+  static final String _tagActionSkip = '[' + 'ACTION]: SKIP_BINARY';
   static final String _tagPath = '[' + 'PATH]: ';
   static final String _tagName = '[' + 'NAME]: ';
   static final String _tagContent = '[' + 'CONTENT]:';
+  static final String _tagEndFile = '[' + 'ENDFILE]';
 
-  static const Set<String> _binaryExtensions = {
-    'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svgz',
-    'zip', 'apk', 'aab', 'tar', 'gz', 'rar', '7z', 'jar', 'exe',
-    'dll', 'so', 'dylib', 'bin', 'dat', 'pdf', 'mp3', 'mp4', 'wav',
-    'm4a', 'ogg', 'flac', 'ttf', 'otf', 'woff', 'woff2', 'class',
-    'dex', 'iso', 'db', 'sqlite', 'aar',
-  };
+  static String formatSize(int bytes) => FileTypes.formatSize(bytes);
 
-  static String formatSize(int bytes) {
-    if (bytes < 1024) {
-      return '${bytes}b';
-    } else if (bytes < 1024 * 1024) {
-      final kb = (bytes / 1024).round();
-      return '${kb}kb';
-    } else {
-      final mb = (bytes / (1024 * 1024)).toStringAsFixed(1);
-      return '${mb}mb';
-    }
-  }
-
-  static Future<bool> isBinaryFile(File file) async {
-    final ext = p.extension(file.path).replaceFirst('.', '').toLowerCase();
-    if (_binaryExtensions.contains(ext)) {
-      return true;
-    }
-    try {
-      final stream = file.openRead(0, 1024);
-      final bytes = await stream.first;
-      if (bytes.contains(0)) {
-        return true;
-      }
-    } catch (_) {}
-    return false;
-  }
+  static Future<bool> isBinaryFile(File file) => FileTypes.isBinary(file);
 
   static Future<String> generateBatchExport({
     required String rootDir,
@@ -85,31 +57,49 @@ class ExportService {
       }
 
       final fileName = p.basename(fullPath);
-      final isBinary = await isBinaryFile(file);
+      final isBinary = await FileTypes.isBinary(file);
 
-      String content;
+      if (i > 0) buffer.writeln();
+
+      // Binary payloads cannot survive a text round trip. Previously they were
+      // exported as the literal text "Size 43kb", which the runner then wrote
+      // over the real image. Emitting SKIP_BINARY keeps the file intact.
       if (isBinary) {
         final length = await file.length();
-        content = 'Size ${formatSize(length)}';
-      } else {
-        try {
-          final bytes = await file.readAsBytes();
-          content = utf8.decode(bytes, allowMalformed: true);
-        } catch (_) {
-          final length = await file.length();
-          content = 'Size ${formatSize(length)}';
-        }
+        buffer.writeln(_tagActionSkip);
+        buffer.writeln('$_tagPath$parentRel');
+        buffer.writeln('$_tagName$fileName');
+        buffer.writeln('$_tagContent');
+        buffer.writeln('Size ${FileTypes.formatSize(length)} (binary asset — not modified)');
+        buffer.writeln(_tagEndFile);
+        continue;
       }
 
-      if (i > 0) {
-        buffer.writeln();
+      String content;
+      try {
+        final bytes = await file.readAsBytes();
+        content = utf8.decode(bytes, allowMalformed: true);
+      } catch (_) {
+        // Declared text but unreadable: mark it as binary rather than
+        // truncating the user's file on the next execute.
+        final length = await file.length();
+        buffer.writeln(_tagActionSkip);
+        buffer.writeln('$_tagPath$parentRel');
+        buffer.writeln('$_tagName$fileName');
+        buffer.writeln(_tagContent);
+        buffer.writeln('Size ${FileTypes.formatSize(length)} (unreadable — not modified)');
+        buffer.writeln(_tagEndFile);
+        continue;
       }
 
-      buffer.writeln(_tagAction);
+      buffer.writeln(_tagActionCreate);
       buffer.writeln('$_tagPath$parentRel');
       buffer.writeln('$_tagName$fileName');
       buffer.writeln(_tagContent);
+      // A single trailing newline is the body terminator; the parser removes
+      // exactly this one so trailing blank lines inside the file survive.
       buffer.writeln(content);
+      buffer.writeln(_tagEndFile);
     }
 
     return buffer.toString();

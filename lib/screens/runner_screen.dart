@@ -7,11 +7,24 @@ import '../services/storage_service.dart';
 import '../widgets/directory_picker_dialog.dart';
 import '../widgets/github_sync_dialog.dart';
 
+/// Description of content pushed into the command buffer from the Explorer.
+class PendingLoad {
+  final String label;
+
+  /// Incremented on every load so the Runner can detect a new one even when
+  /// the label is identical.
+  final int version;
+
+  const PendingLoad({required this.label, required this.version});
+}
+
 class RunnerScreen extends StatefulWidget {
   final String workingDir;
   final Function(String) onDirectoryChanged;
   final TextEditingController codeController;
   final VoidCallback onExecutionCompleted;
+  final PendingLoad? pendingLoad;
+  final VoidCallback? onUndoLoad;
 
   const RunnerScreen({
     super.key,
@@ -19,6 +32,8 @@ class RunnerScreen extends StatefulWidget {
     required this.onDirectoryChanged,
     required this.codeController,
     required this.onExecutionCompleted,
+    this.pendingLoad,
+    this.onUndoLoad,
   });
 
   @override
@@ -32,11 +47,32 @@ class _RunnerScreenState extends State<RunnerScreen> {
   int _lineCount = 1;
   int _charCount = 0;
 
+  int _lastLoadVersion = 0;
+  String? _pendingLoadLabel;
+
+  /// True while the pre-flight confirmation sheet is open.
+  bool _isReviewing = false;
+
   @override
   void initState() {
     super.initState();
     _updateTextMetrics();
     widget.codeController.addListener(_updateTextMetrics);
+    _lastLoadVersion = widget.pendingLoad?.version ?? 0;
+  }
+
+  @override
+  void didUpdateWidget(covariant RunnerScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final incoming = widget.pendingLoad;
+    if (incoming != null && incoming.version != _lastLoadVersion) {
+      _lastLoadVersion = incoming.version;
+      setState(() {
+        // Surfacing this prevents the "loaded a file then ran an old script"
+        // mistake: the buffer is replaced, not appended.
+        _pendingLoadLabel = incoming.label;
+      });
+    }
   }
 
   @override
@@ -85,6 +121,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
   Future<void> _handlePaste() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data != null && data.text != null && data.text!.isNotEmpty) {
+      setState(() => _pendingLoadLabel = null);
       widget.codeController.text = data.text!;
       _updateTextMetrics();
       if (mounted) {
@@ -101,6 +138,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
   }
 
   void _handleClear() {
+    setState(() => _pendingLoadLabel = null);
     widget.codeController.clear();
     _updateTextMetrics();
   }
@@ -163,53 +201,311 @@ class _RunnerScreenState extends State<RunnerScreen> {
       return;
     }
 
-    setState(() {
-      _isExecuting = true;
-    });
-
     _addLog('Parsing input commands...', LogLevel.info);
     final parseResult = CommandParserService.parse(text);
 
     for (final err in parseResult.errors) {
       _addLog('[SYNTAX ERROR] $err', LogLevel.error);
     }
+    for (final warning in parseResult.warnings) {
+      _addLog('[WARNING] $warning', LogLevel.warning);
+    }
 
     if (!parseResult.hasActions) {
       _addLog('No valid actions found to execute.', LogLevel.warning);
-      setState(() {
-        _isExecuting = false;
-      });
       return;
     }
+
+    // Resolve and validate every path before touching disk.
+    final plan = FileExecutionService.plan(
+      rootDir: widget.workingDir,
+      actions: parseResult.actions,
+    );
+    for (final blocked in plan.errors) {
+      _addLog('[BLOCKED] $blocked', LogLevel.error);
+    }
+
+    if (plan.runnable.isEmpty) {
+      _addLog('Every action was blocked. Nothing to execute.', LogLevel.error);
+      return;
+    }
+
+    if (plan.deleteCount > 0 || plan.rejected.isNotEmpty) {
+      _isReviewing = true;
+      final approved = await _confirmExecution(plan);
+      if (!mounted) return;
+      _isReviewing = false;
+      if (!approved) {
+        _addLog('Execution cancelled before any change was made.', LogLevel.warning);
+        return;
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _isExecuting = true;
+    });
 
     await FileExecutionService.executeBatch(
       rootDir: widget.workingDir,
       actions: parseResult.actions,
       onLog: (log) {
-        if (mounted) {
-          setState(() {
-            _terminalLogs.add(log);
-          });
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (_terminalScrollController.hasClients) {
-              _terminalScrollController.animateTo(
-                _terminalScrollController.position.maxScrollExtent,
-                duration: const Duration(milliseconds: 180),
-                curve: Curves.easeOut,
-              );
-            }
-          });
-        }
+        if (!mounted) return;
+        setState(() {
+          _terminalLogs.add(log);
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          if (_terminalScrollController.hasClients) {
+            _terminalScrollController.animateTo(
+              _terminalScrollController.position.maxScrollExtent,
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOut,
+            );
+          }
+        });
       },
     );
 
+    if (!mounted) return;
     widget.onExecutionCompleted();
+    setState(() {
+      _isExecuting = false;
+    });
+  }
 
-    if (mounted) {
-      setState(() {
-        _isExecuting = false;
-      });
-    }
+  /// Pre-flight sheet shown whenever a batch deletes something or contains a
+  /// blocked path. Nothing has been written at this point.
+  Future<bool> _confirmExecution(PlanSummary plan) async {
+    final destructive = plan.runnable.where((i) => i.action.isDestructive).toList();
+    final preview = plan.runnable.take(40).toList();
+
+    final result = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: const Color(0xFF0F1523),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(ctx).size.height * 0.8,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+                child: Row(
+                  children: [
+                    Icon(
+                      destructive.isEmpty ? Icons.fact_check_outlined : Icons.warning_amber_rounded,
+                      size: 18,
+                      color: destructive.isEmpty
+                          ? const Color(0xFF818CF8)
+                          : const Color(0xFFFBBF24),
+                    ),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'Review before executing',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    _summaryChip('${plan.createCount} create', const Color(0xFF10B981)),
+                    if (plan.deleteCount > 0)
+                      _summaryChip('${plan.deleteCount} delete', const Color(0xFFF87171)),
+                    if (plan.skipCount > 0)
+                      _summaryChip('${plan.skipCount} skip', const Color(0xFF94A3B8)),
+                    if (plan.rejected.isNotEmpty)
+                      _summaryChip('${plan.rejected.length} blocked', const Color(0xFFFBBF24)),
+                  ],
+                ),
+              ),
+              if (destructive.isNotEmpty)
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 10, 16, 0),
+                  child: Text(
+                    'Deletions are permanent — files are removed recursively and cannot be restored.',
+                    style: TextStyle(color: Color(0xFFFCA5A5), fontSize: 11.5, height: 1.35),
+                  ),
+                ),
+              const SizedBox(height: 8),
+              const Divider(height: 1, color: Color(0xFF1E293B)),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  itemCount: preview.length,
+                  itemBuilder: (c, i) {
+                    final item = preview[i];
+                    final a = item.action;
+                    final isDelete = a.isDestructive;
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+                      child: Row(
+                        children: [
+                          Icon(
+                            a.type == ActionType.createFile
+                                ? Icons.insert_drive_file_outlined
+                                : a.type == ActionType.createFolder
+                                    ? Icons.create_new_folder_outlined
+                                    : a.type == ActionType.skipBinary
+                                        ? Icons.skip_next_rounded
+                                        : Icons.delete_outline,
+                            size: 15,
+                            color: isDelete
+                                ? const Color(0xFFF87171)
+                                : a.type == ActionType.skipBinary
+                                    ? const Color(0xFF64748B)
+                                    : const Color(0xFF34D399),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '${a.displayName}  ${a.fullRelativePath}',
+                              style: TextStyle(
+                                color: isDelete ? const Color(0xFFFCA5A5) : const Color(0xFFCBD5E1),
+                                fontFamily: 'monospace',
+                                fontSize: 11.5,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+              if (plan.runnable.length > preview.length)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  child: Text(
+                    '+ ${plan.runnable.length - preview.length} more action(s)',
+                    style: const TextStyle(color: Color(0xFF64748B), fontSize: 11.5),
+                  ),
+                ),
+              const Divider(height: 1, color: Color(0xFF1E293B)),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFFCBD5E1),
+                          side: const BorderSide(color: Color(0xFF1E293B)),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        child: const Text('Cancel'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      flex: 2,
+                      child: ElevatedButton.icon(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        icon: const Icon(Icons.play_arrow_rounded, size: 18, color: Colors.white),
+                        label: const Text(
+                          'Run',
+                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor:
+                              destructive.isEmpty ? const Color(0xFF10B981) : const Color(0xFFDC2626),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    return result ?? false;
+  }
+
+  Widget _summaryChip(String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.55)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+
+  Widget _buildPendingLoadBanner() {
+    if (_pendingLoadLabel == null) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111728),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFF312E81)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.info_outline_rounded, size: 15, color: Color(0xFF818CF8)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Buffer replaced with $_pendingLoadLabel. Running it will overwrite those files.',
+              style: const TextStyle(color: Color(0xFFC7D2FE), fontSize: 11.5, height: 1.3),
+            ),
+          ),
+          if (widget.onUndoLoad != null)
+            TextButton(
+              onPressed: () {
+                widget.onUndoLoad!();
+                setState(() => _pendingLoadLabel = null);
+              },
+              style: TextButton.styleFrom(
+                foregroundColor: const Color(0xFF818CF8),
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+              ),
+              child: const Text('Undo', style: TextStyle(fontSize: 11.5)),
+            ),
+          InkWell(
+            onTap: () => setState(() => _pendingLoadLabel = null),
+            borderRadius: BorderRadius.circular(6),
+            child: const Padding(
+              padding: EdgeInsets.all(3),
+              child: Icon(Icons.close_rounded, size: 15, color: Color(0xFF64748B)),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -222,6 +518,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
         children: [
           _buildWorkingDirectoryCard(),
           const SizedBox(height: 8),
+          _buildPendingLoadBanner(),
           _buildEditorCard(),
           const SizedBox(height: 8),
           _buildExecuteButton(),
@@ -272,7 +569,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF6366F1).withOpacity(0.2),
+                    color: const Color(0xFF6366F1).withValues(alpha: 0.2),
                     borderRadius: BorderRadius.circular(6),
                     border: Border.all(color: const Color(0xFF6366F1)),
                   ),
@@ -509,7 +806,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
     return SizedBox(
       height: 44,
       child: ElevatedButton(
-        onPressed: _isExecuting ? null : _executeScript,
+        onPressed: (_isExecuting || _isReviewing) ? null : _executeScript,
         style: ElevatedButton.styleFrom(
           backgroundColor: const Color(0xFF10B981),
           disabledBackgroundColor: const Color(0xFF065F46),

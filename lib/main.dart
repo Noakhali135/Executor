@@ -48,6 +48,14 @@ class _MainShellScreenState extends State<MainShellScreen> {
   int _selectedTab = 0;
   String _workingDir = '';
   final TextEditingController _codeController = TextEditingController();
+
+  /// Bumped every time content is pushed into the command buffer, so the
+  /// Runner can warn that the buffer was replaced.
+  int _loadVersion = 0;
+  PendingLoad? _pendingLoad;
+
+  /// Buffer contents from before the last load, for the Runner's "Undo".
+  String _preLoadBuffer = '';
   final GlobalKey<ExplorerScreenState> _explorerKey = GlobalKey<ExplorerScreenState>();
 
   @override
@@ -78,18 +86,31 @@ class _MainShellScreenState extends State<MainShellScreen> {
     _explorerKey.currentState?.refresh();
   }
 
-  void _onFileSelectedFromExplorer(String relativePath, String content) {
+  /// Replaces the command buffer, remembering what was there so it can be
+  /// undone from the Runner banner.
+  void _loadIntoBuffer(String content, String label) {
+    _preLoadBuffer = _codeController.text;
     setState(() {
       _codeController.text = content;
+      _loadVersion++;
+      _pendingLoad = PendingLoad(label: label, version: _loadVersion);
       _selectedTab = 0;
     });
   }
 
-  void _onBatchExportLoaded(String content) {
+  void _undoLoad() {
     setState(() {
-      _codeController.text = content;
-      _selectedTab = 0;
+      _codeController.text = _preLoadBuffer;
+      _pendingLoad = null;
     });
+  }
+
+  void _onFileSelectedFromExplorer(String relativePath, String content) {
+    _loadIntoBuffer(content, relativePath);
+  }
+
+  void _onBatchExportLoaded(String content, String label) {
+    _loadIntoBuffer(content, label);
   }
 
   void _onExecutionCompleted() {
@@ -109,6 +130,8 @@ class _MainShellScreenState extends State<MainShellScreen> {
               onDirectoryChanged: _onDirectoryChanged,
               codeController: _codeController,
               onExecutionCompleted: _onExecutionCompleted,
+              pendingLoad: _pendingLoad,
+              onUndoLoad: _undoLoad,
             ),
             ExplorerScreen(
               key: _explorerKey,

@@ -33,6 +33,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
   bool _isCreateNew = false;
   bool _isPrivate = true;
   String? _selectedRepo;
+  String _selectedRepoDefaultBranch = 'main';
   List<Map<String, dynamic>> _userRepos = [];
   bool _isLoadingRepos = false;
   bool _pushSelectedOnly = false;
@@ -79,9 +80,14 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       final target = preferredRepo ?? _selectedRepo;
       final bool exists = target != null && repos.any((r) => r['name'] == target);
 
+      final match = exists ? repos.firstWhere((r) => r['name'] == target) : null;
+      final defaultBranch = (match?['default_branch'] as String?) ?? 'main';
+
       setState(() {
         _userRepos = repos;
         _selectedRepo = exists ? target : null;
+        _selectedRepoDefaultBranch = defaultBranch;
+        if (exists) _branchController.text = defaultBranch;
         _isLoadingRepos = false;
       });
     }
@@ -184,8 +190,10 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       await GitHubService.saveRepo(targetRepo);
     }
 
-    Navigator.pop(context);
+    if (mounted) Navigator.pop(context);
 
+    // The dialog is gone but the callback still targets the Runner's log list,
+    // which owns its own mounted checks.
     await GitHubService.pushWorkspace(
       token: _savedToken!,
       owner: _username!,
@@ -345,6 +353,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
                 label: const Center(child: Text('Existing Repo')),
                 selected: !_isCreateNew,
                 selectedColor: const Color(0xFF6366F1),
+                // Selecting "Existing Repo" means _isCreateNew must be false.
                 onSelected: (val) => setState(() => _isCreateNew = !val),
               ),
             ),
@@ -406,10 +415,18 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
                 );
               }).toList(),
               onChanged: (val) async {
-                setState(() => _selectedRepo = val);
-                if (val != null) {
-                  await GitHubService.saveRepo(val);
-                }
+                if (val == null) return;
+                final match = _userRepos.firstWhere(
+                  (r) => r['name'] == val,
+                  orElse: () => const {'default_branch': 'main'},
+                );
+                final branch = (match['default_branch'] as String?) ?? 'main';
+                setState(() {
+                  _selectedRepo = val;
+                  _selectedRepoDefaultBranch = branch;
+                  _branchController.text = branch;
+                });
+                await GitHubService.saveRepo(val);
               },
             ),
         ],
@@ -418,7 +435,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
           controller: _branchController,
           style: const TextStyle(color: Colors.white, fontSize: 12.5, fontFamily: 'monospace'),
           decoration: InputDecoration(
-            labelText: 'Target Branch',
+            labelText: 'Target Branch (repo default: $_selectedRepoDefaultBranch)',
             labelStyle: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
             filled: true,
             fillColor: const Color(0xFF080C16),

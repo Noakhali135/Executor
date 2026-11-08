@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
+import '../services/file_types.dart';
 import 'html_preview_widget.dart';
 
 class FileEditorDialog extends StatefulWidget {
@@ -39,12 +40,9 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
   int _charCount = 0;
   int _fileSizeBytes = 0;
 
-  static const Set<String> _imageExtensions = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'};
-  static const Set<String> _binaryExtensions = {
-    'zip', 'apk', 'aab', 'tar', 'gz', 'rar', '7z', 'jar', 'exe',
-    'so', 'dll', 'dylib', 'bin', 'dat', 'pdf', 'mp3', 'mp4', 'wav',
-    'class', 'dex', 'iso', 'db', 'sqlite', 'aar',
-  };
+  static bool _isImagePath(String path) => FileTypes.isImage(path);
+
+  static bool _isBinaryPath(String path) => FileTypes.hasBinaryExtension(path);
 
   bool get _isHtml {
     final ext = p.extension(widget.filePath).toLowerCase();
@@ -133,11 +131,10 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
       return;
     }
 
-    final ext = p.extension(widget.filePath).replaceFirst('.', '').toLowerCase();
     final length = await file.length();
     _fileSizeBytes = length;
 
-    if (_imageExtensions.contains(ext)) {
+    if (_isImagePath(widget.filePath)) {
       if (mounted) {
         setState(() {
           _isImage = true;
@@ -147,7 +144,7 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
       return;
     }
 
-    if (_binaryExtensions.contains(ext)) {
+    if (_isBinaryPath(widget.filePath)) {
       if (mounted) {
         setState(() {
           _isBinary = true;
@@ -201,6 +198,46 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
           });
         }
       }
+    }
+  }
+
+  /// Asks before discarding unsaved edits.
+  Future<bool> _confirmDiscard() async {
+    if (!_isDirty) return true;
+    final discard = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF111827),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: const BorderSide(color: Color(0xFF1E293B)),
+        ),
+        title: const Text(
+          'Discard changes?',
+          style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+        ),
+        content: Text(
+          'Unsaved edits to ${p.basename(widget.filePath)} will be lost.',
+          style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Keep editing', style: TextStyle(color: Color(0xFF94A3B8))),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Discard', style: TextStyle(color: Color(0xFFF87171))),
+          ),
+        ],
+      ),
+    );
+    return discard ?? false;
+  }
+
+  Future<void> _handleClose() async {
+    if (await _confirmDiscard()) {
+      if (mounted) Navigator.pop(context);
     }
   }
 
@@ -264,256 +301,271 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
     final canUndo = _undoStack.length > 1;
     final canRedo = _redoStack.isNotEmpty;
 
-    return Dialog(
-      backgroundColor: const Color(0xFF0F1523),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: Color(0xFF1E293B)),
-      ),
-      insetPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 18),
-      child: SizedBox(
-        height: MediaQuery.of(context).size.height * 0.88,
-        child: Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: const BoxDecoration(
-                border: Border(bottom: BorderSide(color: Color(0xFF1E293B))),
-              ),
-              child: Row(
-                children: [
-                  _buildFileIcon(),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                fileName,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 14,
-                                  fontFamily: 'monospace',
+    return PopScope(
+      canPop: !_isDirty,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        if (await _confirmDiscard()) {
+          if (mounted) Navigator.pop(context);
+        }
+      },
+      child: Dialog(
+        backgroundColor: const Color(0xFF0F1523),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: Color(0xFF1E293B)),
+        ),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 18),
+        child: SizedBox(
+          height: MediaQuery.of(context).size.height * 0.88,
+          child: Column(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: const BoxDecoration(
+                  border: Border(bottom: BorderSide(color: Color(0xFF1E293B))),
+                ),
+                child: Row(
+                  children: [
+                    _buildFileIcon(),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  fileName,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                    fontFamily: 'monospace',
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
                                 ),
-                                overflow: TextOverflow.ellipsis,
+                              ),
+                              if (_isDirty) ...[
+                                const SizedBox(width: 6),
+                                Container(
+                                  width: 6,
+                                  height: 6,
+                                  decoration: const BoxDecoration(
+                                    color: Color(0xFFF59E0B),
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                          Text(
+                            '$relPath  (${_formatSize(_fileSizeBytes)})',
+                            style: const TextStyle(color: Color(0xFF64748B), fontSize: 10.5),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (_isHtml)
+                      Container(
+                        margin: const EdgeInsets.only(right: 8),
+                        height: 30,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF080C16),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFF1E293B)),
+                        ),
+                        child: Row(
+                          children: [
+                            InkWell(
+                              onTap: () => setState(() => _activeTab = 0),
+                              borderRadius: const BorderRadius.horizontal(left: Radius.circular(8)),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                color: _activeTab == 0 ? const Color(0xFF6366F1) : Colors.transparent,
+                                child: const Row(
+                                  children: [
+                                    Icon(Icons.code_rounded, size: 13, color: Colors.white),
+                                    SizedBox(width: 4),
+                                    Text('Code', style: TextStyle(color: Colors.white, fontSize: 11)),
+                                  ],
+                                ),
                               ),
                             ),
-                            if (_isDirty) ...[
-                              const SizedBox(width: 6),
-                              Container(
-                                width: 6,
-                                height: 6,
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFFF59E0B),
-                                  shape: BoxShape.circle,
+                            InkWell(
+                              onTap: () async {
+                                // The preview server reads from disk for assets,
+                                // so flush pending edits first; otherwise the
+                                // rendered page silently ignored them.
+                                if (_isDirty) await _saveFile();
+                                if (mounted) setState(() => _activeTab = 1);
+                              },
+                              borderRadius: const BorderRadius.horizontal(right: Radius.circular(8)),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                color: _activeTab == 1 ? const Color(0xFF10B981) : Colors.transparent,
+                                child: const Row(
+                                  children: [
+                                    Icon(Icons.visibility_rounded, size: 13, color: Colors.white),
+                                    SizedBox(width: 4),
+                                    Text('Render', style: TextStyle(color: Colors.white, fontSize: 11)),
+                                  ],
                                 ),
                               ),
-                            ],
+                            ),
                           ],
                         ),
-                        Text(
-                          '$relPath  (${_formatSize(_fileSizeBytes)})',
-                          style: const TextStyle(color: Color(0xFF64748B), fontSize: 10.5),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (_isHtml)
-                    Container(
-                      margin: const EdgeInsets.only(right: 8),
-                      height: 30,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF080C16),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: const Color(0xFF1E293B)),
                       ),
-                      child: Row(
+                    if (!_isBinary && !_isImage) ...[
+                      if (widget.onSendToRunner != null)
+                        IconButton(
+                          icon: const Icon(Icons.send_to_mobile_rounded, color: Color(0xFF818CF8), size: 18),
+                          tooltip: 'Send to Runner Editor',
+                          onPressed: () {
+                            widget.onSendToRunner!(_codeController.text);
+                            Navigator.pop(context);
+                          },
+                        ),
+                      SizedBox(
+                        height: 32,
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF10B981),
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
+                          onPressed: _isSaving ? null : _saveFile,
+                          icon: _isSaving
+                              ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                              : const Icon(Icons.save_rounded, color: Colors.white, size: 15),
+                          label: const Text('Save', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(width: 4),
+                    IconButton(
+                      onPressed: _handleClose,
+                      icon: const Icon(Icons.close_rounded, color: Color(0xFF94A3B8), size: 20),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: _isLoading
+                    ? const Center(child: CircularProgressIndicator(color: Color(0xFF818CF8), strokeWidth: 2))
+                    : _isImage
+                        ? Center(
+                            child: InteractiveViewer(
+                              child: Image.file(File(widget.filePath)),
+                            ),
+                          )
+                        : _isBinary
+                            ? Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    const Icon(Icons.extension_rounded, size: 48, color: Color(0xFF64748B)),
+                                    const SizedBox(height: 12),
+                                    Text(
+                                      fileName,
+                                      style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      'Binary file (${_formatSize(_fileSizeBytes)})\nCannot edit directly as plain text.',
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : _isHtml && _activeTab == 1
+                                ? HtmlPreviewWidget(
+                                    htmlContent: _codeController.text,
+                                    baseDir: p.dirname(widget.filePath),
+                                    fileName: fileName,
+                                  )
+                                : Container(
+                                    color: const Color(0xFF070B14),
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                    child: TextField(
+                                      controller: _codeController,
+                                      maxLines: null,
+                                      expands: true,
+                                      style: const TextStyle(
+                                        color: Color(0xFFCBD5E1),
+                                        fontFamily: 'monospace',
+                                        fontSize: 12.5,
+                                        height: 1.42,
+                                      ),
+                                      decoration: const InputDecoration(
+                                        border: InputBorder.none,
+                                        contentPadding: EdgeInsets.zero,
+                                      ),
+                                    ),
+                                  ),
+              ),
+              if (!_isBinary && !_isImage)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF080C16),
+                    border: Border(top: BorderSide(color: Color(0xFF1E293B))),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
                         children: [
+                          Text(
+                            'Lines: $_lineCount | Chars: $_charCount',
+                            style: const TextStyle(color: Color(0xFF64748B), fontFamily: 'monospace', fontSize: 11),
+                          ),
+                          const SizedBox(width: 12),
                           InkWell(
-                            onTap: () => setState(() => _activeTab = 0),
-                            borderRadius: const BorderRadius.horizontal(left: Radius.circular(8)),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                              color: _activeTab == 0 ? const Color(0xFF6366F1) : Colors.transparent,
-                              child: const Row(
-                                children: [
-                                  Icon(Icons.code_rounded, size: 13, color: Colors.white),
-                                  SizedBox(width: 4),
-                                  Text('Code', style: TextStyle(color: Colors.white, fontSize: 11)),
-                                ],
+                            onTap: canUndo ? _undo : null,
+                            borderRadius: BorderRadius.circular(4),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                              child: Icon(
+                                Icons.undo_rounded,
+                                size: 16,
+                                color: canUndo ? const Color(0xFF818CF8) : const Color(0xFF334155),
                               ),
                             ),
                           ),
+                          const SizedBox(width: 4),
                           InkWell(
-                            onTap: () => setState(() => _activeTab = 1),
-                            borderRadius: const BorderRadius.horizontal(right: Radius.circular(8)),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                              color: _activeTab == 1 ? const Color(0xFF10B981) : Colors.transparent,
-                              child: const Row(
-                                children: [
-                                  Icon(Icons.visibility_rounded, size: 13, color: Colors.white),
-                                  SizedBox(width: 4),
-                                  Text('Render', style: TextStyle(color: Colors.white, fontSize: 11)),
-                                ],
+                            onTap: canRedo ? _redo : null,
+                            borderRadius: BorderRadius.circular(4),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                              child: Icon(
+                                Icons.redo_rounded,
+                                size: 16,
+                                color: canRedo ? const Color(0xFF818CF8) : const Color(0xFF334155),
                               ),
                             ),
                           ),
                         ],
                       ),
-                    ),
-                  if (!_isBinary && !_isImage) ...[
-                    if (widget.onSendToRunner != null)
-                      IconButton(
-                        icon: const Icon(Icons.send_to_mobile_rounded, color: Color(0xFF818CF8), size: 18),
-                        tooltip: 'Send to Runner Editor',
-                        onPressed: () {
-                          widget.onSendToRunner!(_codeController.text);
-                          Navigator.pop(context);
-                        },
-                      ),
-                    SizedBox(
-                      height: 32,
-                      child: ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF10B981),
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      Text(
+                        _isDirty ? '● Unsaved' : 'Saved',
+                        style: TextStyle(
+                          color: _isDirty ? const Color(0xFFF59E0B) : const Color(0xFF10B981),
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
                         ),
-                        onPressed: _isSaving ? null : _saveFile,
-                        icon: _isSaving
-                            ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                            : const Icon(Icons.save_rounded, color: Colors.white, size: 15),
-                        label: const Text('Save', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
                       ),
-                    ),
-                  ],
-                  const SizedBox(width: 4),
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.close_rounded, color: Color(0xFF94A3B8), size: 20),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
+                    ],
                   ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: _isLoading
-                  ? const Center(child: CircularProgressIndicator(color: Color(0xFF818CF8), strokeWidth: 2))
-                  : _isImage
-                      ? Center(
-                          child: InteractiveViewer(
-                            child: Image.file(File(widget.filePath)),
-                          ),
-                        )
-                      : _isBinary
-                          ? Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  const Icon(Icons.extension_rounded, size: 48, color: Color(0xFF64748B)),
-                                  const SizedBox(height: 12),
-                                  Text(
-                                    fileName,
-                                    style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    'Binary file (${_formatSize(_fileSizeBytes)})\nCannot edit directly as plain text.',
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
-                                  ),
-                                ],
-                              ),
-                            )
-                          : _isHtml && _activeTab == 1
-                              ? HtmlPreviewWidget(
-                                  htmlContent: _codeController.text,
-                                  baseDir: p.dirname(widget.filePath),
-                                  fileName: fileName,
-                                )
-                              : Container(
-                                  color: const Color(0xFF070B14),
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                  child: TextField(
-                                    controller: _codeController,
-                                    maxLines: null,
-                                    expands: true,
-                                    style: const TextStyle(
-                                      color: Color(0xFFCBD5E1),
-                                      fontFamily: 'monospace',
-                                      fontSize: 12.5,
-                                      height: 1.42,
-                                    ),
-                                    decoration: const InputDecoration(
-                                      border: InputBorder.none,
-                                      contentPadding: EdgeInsets.zero,
-                                    ),
-                                  ),
-                                ),
-            ),
-            if (!_isBinary && !_isImage)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: const BoxDecoration(
-                  color: Color(0xFF080C16),
-                  border: Border(top: BorderSide(color: Color(0xFF1E293B))),
                 ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Row(
-                      children: [
-                        Text(
-                          'Lines: $_lineCount | Chars: $_charCount',
-                          style: const TextStyle(color: Color(0xFF64748B), fontFamily: 'monospace', fontSize: 11),
-                        ),
-                        const SizedBox(width: 12),
-                        InkWell(
-                          onTap: canUndo ? _undo : null,
-                          borderRadius: BorderRadius.circular(4),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                            child: Icon(
-                              Icons.undo_rounded,
-                              size: 16,
-                              color: canUndo ? const Color(0xFF818CF8) : const Color(0xFF334155),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        InkWell(
-                          onTap: canRedo ? _redo : null,
-                          borderRadius: BorderRadius.circular(4),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                            child: Icon(
-                              Icons.redo_rounded,
-                              size: 16,
-                              color: canRedo ? const Color(0xFF818CF8) : const Color(0xFF334155),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    Text(
-                      _isDirty ? '● Unsaved' : 'Saved',
-                      style: TextStyle(
-                        color: _isDirty ? const Color(0xFFF59E0B) : const Color(0xFF10B981),
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
