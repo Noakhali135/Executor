@@ -595,7 +595,8 @@ class GitHubService {
     if (clean.contains(' ')) {
       // Spaces in repo names cause nothing but trouble downstream; GitHub
       // accepts them but they are easy to mistype when selecting later.
-      return const CreateRepoResult(
+      // Not const: the message interpolates the runtime name.
+      return CreateRepoResult(
         success: false,
         message: 'Repository names cannot contain spaces: "$clean"',
         remedy: 'Use hyphens instead, e.g. "islamic-routine".',

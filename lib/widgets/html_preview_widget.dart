@@ -37,7 +37,10 @@ class HtmlPreviewWidget extends StatefulWidget {
 class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
   HttpServer? _localServer;
   int? _serverPort;
-  late final WebViewController _webViewController;
+  /// Created eagerly in the field initializer: a `late final` assigned inside
+  /// initState would throw `LateInitializationError` from build(), _reloadPage
+  /// or the copy button if anything read it before that assignment ran.
+  final WebViewController _webViewController = WebViewController();
   bool _isLoadingWeb = true;
 
   @override
@@ -48,7 +51,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
   }
 
   void _initWebViewController() {
-    _webViewController = WebViewController()
+    _webViewController
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(const Color(0xFF070B14))
       ..setNavigationDelegate(
