@@ -5,6 +5,7 @@ import 'package:executor/services/command_parser_service.dart';
 import 'package:executor/services/export_service.dart';
 import 'package:executor/services/file_execution_service.dart';
 import 'package:executor/services/github_service.dart';
+import 'package:executor/services/workspace_probe.dart';
 import 'package:executor/services/path_guard.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -271,6 +272,73 @@ void main() {
         '/git/blobs',
       );
       expect(uri.toString(), endsWith('/Islamic%20Routine/git/blobs'));
+    });
+  });
+
+  group('WorkspaceProbe', () {
+    test('finds nested files and skips build output', () async {
+      await Directory(p.join(tempRoot.path, 'lib')).create();
+      await Directory(p.join(tempRoot.path, 'build')).create();
+      await File(p.join(tempRoot.path, 'lib', 'main.dart')).writeAsString('x');
+      await File(p.join(tempRoot.path, 'pubspec.yaml')).writeAsString('name: x');
+      await File(p.join(tempRoot.path, 'build', 'junk.o')).writeAsString('x');
+
+      final scan = await WorkspaceProbe.scan(tempRoot.path);
+
+      expect(scan.files.map((f) => p.basename(f.path)).toSet(),
+          containsAll({'main.dart', 'pubspec.yaml'}));
+      expect(scan.files.map((f) => p.basename(f.path)), isNot(contains('junk.o')));
+      expect(scan.skippedIgnored, greaterThan(0));
+      expect(scan.looksLikePermissionProblem, isFalse);
+    });
+
+    test('an empty tree is reported as empty, not as a permission problem', () async {
+      final scan = await WorkspaceProbe.scan(tempRoot.path);
+      expect(scan.files, isEmpty);
+      expect(scan.looksLikePermissionProblem, isFalse);
+    });
+
+    test('folders without readable contents look like a permission problem', () async {
+      // Mirrors scoped storage: directories are enumerable, files are not.
+      await Directory(p.join(tempRoot.path, 'android')).create();
+      await Directory(p.join(tempRoot.path, 'lib')).create();
+
+      final scan = await WorkspaceProbe.scan(tempRoot.path);
+      expect(scan.files, isEmpty);
+      expect(scan.directoryCount, greaterThan(0));
+      expect(scan.looksLikePermissionProblem, isTrue);
+    });
+
+    test('diagnose() explains the scoped-storage case', () async {
+      await Directory(p.join(tempRoot.path, 'android')).create();
+      final problems = await WorkspaceProbe.diagnose(tempRoot.path);
+
+      expect(problems, isNotEmpty);
+      expect(problems.join(' ').toLowerCase(), contains('all files access'));
+    });
+
+    test('diagnose() flags a missing directory', () async {
+      final problems = await WorkspaceProbe.diagnose(
+        p.join(tempRoot.path, 'does-not-exist'),
+      );
+      expect(problems.single, contains('does not exist'));
+    });
+
+    test('respects a specific-path selection', () async {
+      final nested = Directory(p.join(tempRoot.path, 'only'));
+      await nested.create();
+      await File(p.join(nested.path, 'a.txt')).writeAsString('a');
+      await File(p.join(tempRoot.path, 'b.txt')).writeAsString('b');
+
+      final scan = await WorkspaceProbe.scan(
+        tempRoot.path,
+        specificPaths: {nested.path},
+      );
+      expect(scan.files.map((f) => p.basename(f.path)), ['a.txt']);
+    });
+
+    test('canonical() never throws on a missing path', () {
+      expect(WorkspaceProbe.canonical(p.join(tempRoot.path, 'nope')), isNotEmpty);
     });
   });
 }

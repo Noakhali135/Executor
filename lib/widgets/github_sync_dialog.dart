@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/command_action.dart';
 import '../services/github_service.dart';
+import '../services/workspace_probe.dart';
 
 class GitHubSyncDialog extends StatefulWidget {
   final String workingDir;
@@ -190,6 +191,39 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
           behavior: SnackBarBehavior.floating,
         ),
       );
+      return;
+    }
+
+    // Pre-flight the workspace: pushing to a folder Android will not let us
+    // read used to fail with a bare "No files found to push to GitHub".
+    final probe = await WorkspaceProbe.scan(widget.workingDir, maxFiles: 200);
+    if (probe.files.isEmpty) {
+      final problems = await WorkspaceProbe.diagnose(widget.workingDir);
+      for (final problem in problems) {
+        widget.onLog('[WORKSPACE] $problem', LogLevel.error);
+      }
+      if (probe.looksLikePermissionProblem) {
+        widget.onLog(
+          '[HOW TO FIX] Tap the banner in the directory picker to grant "All files access", '
+          'then re-select the folder — or copy the project into the DevRunner workspace.',
+          LogLevel.warning,
+        );
+      }
+      if (mounted) {
+        setState(() => _isPushing = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              probe.looksLikePermissionProblem
+                  ? 'This folder is not readable. Grant file access first.'
+                  : 'This folder contains no files to push.',
+            ),
+            backgroundColor: const Color(0xFFDC2626),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
       return;
     }
 

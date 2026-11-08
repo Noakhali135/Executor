@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/command_action.dart';
 import 'secure_store.dart';
+import 'workspace_probe.dart';
 
 class TokenVerifyResult {
   final bool success;
@@ -118,12 +119,6 @@ class GitHubService {
   /// GitHub rejects blobs above 100 MB outright; we refuse earlier so a huge
   /// file cannot fail the whole push (or exhaust device memory).
   static const int maxBlobBytes = 45 * 1024 * 1024;
-
-  /// Directories that are never worth pushing and are usually enormous.
-  static const Set<String> _ignoredDirectoryNames = {
-    '.git', '.dart_tool', 'build', 'node_modules', '.gradle', '.idea',
-    '.vscode', '__pycache__', '.venv', 'venv', 'Pods', '.next', '.cache',
-  };
 
   static const Duration _requestTimeout = Duration(seconds: 20);
 
@@ -1205,49 +1200,64 @@ class GitHubService {
   }
 
   /// Collects candidate files, skipping VCS internals and build output.
+  ///
+  /// Uses [WorkspaceProbe], which survives individual unreadable entries
+  /// instead of aborting the whole walk, and reports *why* nothing was found
+  /// rather than logging a bare "No files found".
   static Future<List<File>> _collectFiles({
     required String workingDir,
     Set<String>? specificPaths,
     required Function(String message, LogLevel level) onLog,
   }) async {
-    final files = <File>[];
+    final scan = await WorkspaceProbe.scan(workingDir, specificPaths: specificPaths);
 
-    bool isIgnored(String path) =>
-        p.split(path).any((segment) => _ignoredDirectoryNames.contains(segment));
+    onLog(
+      'Scanned ${scan.directoryCount} folder(s) and found ${scan.files.length} file(s)'
+      '${scan.skippedIgnored > 0 ? ' (${scan.skippedIgnored} skipped: build/VCS output)' : ''}.',
+      LogLevel.info,
+    );
 
-    if (specificPaths != null && specificPaths.isNotEmpty) {
-      for (final path in specificPaths) {
-        final f = File(path);
-        final d = Directory(path);
-        if (await f.exists()) {
-          if (!isIgnored(f.path)) files.add(f);
-        } else if (await d.exists()) {
-          try {
-            final entries = await d.list(recursive: true, followLinks: false).toList();
-            for (final e in entries) {
-              if (e is File && !isIgnored(e.path)) files.add(e);
-            }
-          } catch (e) {
-            onLog('Could not read $path: $e', LogLevel.warning);
-          }
-        }
+    if (scan.unreadableEntries > 0) {
+      onLog(
+        '${scan.unreadableEntries} folder(s) could not be read and were skipped.',
+        LogLevel.warning,
+      );
+      for (final error in scan.errors) {
+        onLog('  $error', LogLevel.warning);
       }
-      return files;
     }
 
-    final root = Directory(workingDir);
-    if (!await root.exists()) {
-      onLog('Working directory not found: $workingDir', LogLevel.error);
-      return files;
-    }
-    try {
-      final entries = await root.list(recursive: true, followLinks: false).toList();
-      for (final e in entries) {
-        if (e is File && !isIgnored(e.path)) files.add(e);
+    if (scan.files.isEmpty) {
+      if (scan.looksLikePermissionProblem) {
+        // Folders visible, contents invisible: scoped storage, not an empty
+        // project. Say so instead of leaving the user guessing.
+        onLog(
+          '[NO ACCESS] ${scan.directoryCount} folder(s) are visible but their contents are not readable.',
+          LogLevel.error,
+        );
+        onLog(
+          '[HOW TO FIX] Android scoped storage blocks reading /storage/emulated/0/Download '
+          'without "All files access". Do one of these:',
+          LogLevel.warning,
+        );
+        onLog(
+          '  1. Open the directory picker and tap the banner "Only the app workspace is writable" '
+          'to grant access, then re-select this folder.',
+          LogLevel.warning,
+        );
+        onLog(
+          '  2. Or copy the project into the DevRunner workspace '
+          '(Android/data/com.executor.executor/files/DevRunner) and work from there.',
+          LogLevel.warning,
+        );
+      } else {
+        onLog(
+          '[EMPTY] No files found in $workingDir (and no build/VCS folders were skipped).',
+          LogLevel.warning,
+        );
       }
-    } catch (e) {
-      onLog('Could not enumerate workspace: $e', LogLevel.error);
     }
-    return files;
+
+    return scan.files;
   }
 }

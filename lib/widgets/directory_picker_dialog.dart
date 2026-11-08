@@ -31,17 +31,6 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
     '/storage/emulated/0/Documents',
   ];
 
-  @override
-  void initState() {
-    super.initState();
-    _currentPath = Directory.current.path;
-    _pathInputController.text = _currentPath;
-    // Deliberately no permission request here: opening the picker must not
-    // trigger a system dialog. Access is requested only from the explicit
-    // "grant access" action below.
-    _bootstrap();
-  }
-
   Future<void> _bootstrap() async {
     final hasAccess = await StorageService.hasBroadStorageAccess();
 
@@ -108,8 +97,36 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
     await _loadDirectories(dir);
   }
 
+  late final AppLifecycleListener _lifecycleListener;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentPath = Directory.current.path;
+    _pathInputController.text = _currentPath;
+
+    // "All files access" is granted in a system settings screen; when the user
+    // comes back, re-check rather than assuming the grant did not happen.
+    _lifecycleListener = AppLifecycleListener(
+      onResume: () async {
+        if (!mounted) return;
+        final access = await StorageService.refreshAllFilesAccess();
+        if (mounted && access != _hasBroadAccess) {
+          setState(() => _hasBroadAccess = access);
+          if (access) await _loadDirectories(_currentPath);
+        }
+      },
+    );
+
+    // Deliberately no permission request here: opening the picker must not
+    // trigger a system dialog. Access is requested only from the explicit
+    // "grant access" action below.
+    _bootstrap();
+  }
+
   @override
   void dispose() {
+    _lifecycleListener.dispose();
     _pathInputController.dispose();
     _newFolderController.dispose();
     super.dispose();

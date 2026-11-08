@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import '../models/tree_node.dart';
 import '../services/export_service.dart';
+import '../services/workspace_probe.dart';
 import '../widgets/file_editor_dialog.dart';
 
 class ExplorerScreen extends StatefulWidget {
@@ -30,6 +31,12 @@ class ExplorerScreenState extends State<ExplorerScreen> {
   List<TreeNode> _rootNodes = [];
   bool _isLoading = false;
   String _filterQuery = '';
+
+  bool _showHidden = false;
+
+  /// Set when a folder could not be read, so the UI can explain why a project
+  /// looks empty instead of silently rendering nothing.
+  String? _scanError;
 
   bool _isSelectionMode = false;
   final Set<String> _selectedPaths = <String>{};
@@ -110,33 +117,99 @@ class ExplorerScreenState extends State<ExplorerScreen> {
     final dir = Directory(dirPath);
     if (!await dir.exists()) return [];
 
+    final nodes = <TreeNode>[];
+    var failures = 0;
+
     try {
-      final entries = await dir.list(followLinks: false).toList();
-      final nodes = <TreeNode>[];
-
-      for (final entity in entries) {
+      await for (final entity in dir.list(followLinks: false)) {
         final name = p.basename(entity.path);
-        if (name.startsWith('.')) continue;
+        // Hidden entries are only hidden on request: .github/, .env and
+        // .gitignore are legitimate parts of a project and used to be
+        // unreachable from the explorer entirely.
+        if (!_showHidden && name.startsWith('.')) continue;
 
-        final isDir = entity is Directory;
         nodes.add(TreeNode(
           fullPath: entity.path,
           name: name,
-          isDirectory: isDir,
+          isDirectory: entity is Directory,
           depth: depth,
         ));
       }
-
-      nodes.sort((a, b) {
-        if (a.isDirectory && !b.isDirectory) return -1;
-        if (!a.isDirectory && b.isDirectory) return 1;
-        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-      });
-
-      return nodes;
-    } catch (_) {
-      return [];
+    } catch (e) {
+      // Distinguish "empty folder" from "cannot read folder". Previously both
+      // produced an empty list with no explanation.
+      failures++;
+      if (mounted) {
+        setState(() {
+          _scanError = 'Cannot read ${p.basename(dirPath)}: ${_describeError(e)}';
+        });
+      }
     }
+
+    if (failures == 0 && _scanError != null && mounted) {
+      setState(() => _scanError = null);
+    }
+
+    nodes.sort((a, b) {
+      if (a.isDirectory && !b.isDirectory) return -1;
+      if (!a.isDirectory && b.isDirectory) return 1;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+
+    return nodes;
+  }
+
+  String _describeError(Object error) {
+    final text = error.toString();
+    if (text.contains('errno = 13') || text.contains('Permission denied')) {
+      return 'permission denied by Android (scoped storage)';
+    }
+    if (text.contains('errno = 2')) return 'no longer exists';
+    return error is FileSystemException ? error.message : text;
+  }
+
+  /// Walks up to find the first folder that actually exposes files.
+  ///
+  /// A project inside /storage/emulated/0/Download can show its folders but not
+  /// their contents without "All files access"; this tells the user that
+  /// directly instead of letting them wonder where the files went.
+  Future<void> _diagnoseEmptyView() async {
+    final problems = await WorkspaceProbe.diagnose(widget.workingDir);
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF111827),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: const BorderSide(color: Color(0xFF1E293B)),
+        ),
+        title: const Row(
+          children: [
+            Icon(Icons.info_outline_rounded, color: Color(0xFF818CF8), size: 18),
+            SizedBox(width: 8),
+            Text(
+              'Why is this empty?',
+              style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Text(
+            problems.isEmpty
+                ? 'This folder really is empty.'
+                : problems.map((e) => '• $e').join('\n\n'),
+            style: const TextStyle(color: Color(0xFFCBD5E1), fontSize: 12.5, height: 1.4),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close', style: TextStyle(color: Color(0xFF94A3B8))),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _toggleFolder(TreeNode node) async {
@@ -256,7 +329,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
       final d = Directory(normTarget);
       if (await d.exists()) {
         await for (final entity in d.list(recursive: true, followLinks: false)) {
-          if (!p.basename(entity.path).startsWith('.')) {
+          if (_showHidden || !p.basename(entity.path).startsWith('.')) {
             into.add(p.normalize(entity.path));
           }
         }
@@ -668,6 +741,17 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                       Row(
                         children: [
                           _buildSmallIconButton(
+                            icon: _showHidden
+                                ? Icons.visibility_rounded
+                                : Icons.visibility_off_outlined,
+                            tooltip: _showHidden ? 'Hide dotfiles' : 'Show dotfiles',
+                            onTap: () async {
+                              setState(() => _showHidden = !_showHidden);
+                              await _loadDirectoryTree();
+                            },
+                          ),
+                          const SizedBox(width: 5),
+                          _buildSmallIconButton(
                             icon: Icons.unfold_more,
                             tooltip: 'Expand All',
                             onTap: _expandAll,
@@ -752,6 +836,35 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                       ],
                     ),
                   ),
+                  if (_scanError != null)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      color: const Color(0xFF3F1D1D),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.lock_outline_rounded, size: 14, color: Color(0xFFFCA5A5)),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _scanError!,
+                              style: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 11.5),
+                            ),
+                          ),
+                          InkWell(
+                            onTap: _diagnoseEmptyView,
+                            child: const Text(
+                              'Details',
+                              style: TextStyle(
+                                color: Color(0xFFF87171),
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   Expanded(
                     child: _isLoading
                         ? const Center(
@@ -762,11 +875,37 @@ class ExplorerScreenState extends State<ExplorerScreen> {
                           )
                         : visibleNodes.isEmpty
                             ? Center(
-                                child: Text(
-                                  widget.workingDir.isEmpty
-                                      ? 'Select a working directory in Runner'
-                                      : 'Directory is empty',
-                                  style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        widget.workingDir.isEmpty
+                                            ? 'Select a working directory in Runner'
+                                            : 'Directory is empty',
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(
+                                          color: Color(0xFF64748B),
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                      if (widget.workingDir.isNotEmpty) ...[
+                                        const SizedBox(height: 10),
+                                        TextButton.icon(
+                                          onPressed: _diagnoseEmptyView,
+                                          icon: const Icon(Icons.help_outline_rounded, size: 15),
+                                          label: const Text(
+                                            'Why is this empty?',
+                                            style: TextStyle(fontSize: 12),
+                                          ),
+                                          style: TextButton.styleFrom(
+                                            foregroundColor: const Color(0xFF818CF8),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
                                 ),
                               )
                             : ListView.builder(

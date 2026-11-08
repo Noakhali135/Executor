@@ -94,15 +94,35 @@ class StorageService {
 
   /// Explicit, user-initiated request for "All files access" (Android 11+).
   ///
-  /// Returns true if it was already granted. When it is not granted, Android
-  /// sends the user to system settings — there is no in-app grant dialog for
-  /// this permission, which is why the UI must explain it first.
+  /// Android has no in-app dialog for this permission: the request opens the
+  /// system settings page. The user then leaves and returns to the app, so the
+  /// grant is re-checked a few times with a short delay instead of trusting the
+  /// value returned the instant the settings screen was dismissed (which is
+  /// usually still `denied` and made the app look like it had failed).
   static Future<bool> requestAllFilesAccess() async {
     if (!Platform.isAndroid) return true;
     try {
       if (await Permission.manageExternalStorage.isGranted) return true;
-      final status = await Permission.manageExternalStorage.request();
-      return status.isGranted;
+
+      await Permission.manageExternalStorage.request();
+
+      // Poll for the grant the user just made in system settings.
+      for (var attempt = 0; attempt < 5; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        if (await Permission.manageExternalStorage.isGranted) return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Re-checks access after the app resumes from system settings.
+  static Future<bool> refreshAllFilesAccess() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      return await Permission.manageExternalStorage.isGranted ||
+          await Permission.storage.isGranted;
     } catch (_) {
       return false;
     }

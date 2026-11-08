@@ -4,6 +4,7 @@ import '../models/command_action.dart';
 import '../services/command_parser_service.dart';
 import '../services/file_execution_service.dart';
 import '../services/storage_service.dart';
+import '../services/workspace_probe.dart';
 import '../widgets/directory_picker_dialog.dart';
 import '../widgets/github_sync_dialog.dart';
 
@@ -59,6 +60,9 @@ class _RunnerScreenState extends State<RunnerScreen> {
     _updateTextMetrics();
     widget.codeController.addListener(_updateTextMetrics);
     _lastLoadVersion = widget.pendingLoad?.version ?? 0;
+    if (widget.workingDir.isNotEmpty) {
+      _diagnoseWorkingDir(widget.workingDir);
+    }
   }
 
   @override
@@ -93,6 +97,19 @@ class _RunnerScreenState extends State<RunnerScreen> {
     }
   }
 
+  /// Checks the selected workspace as soon as it changes, so a scoped-storage
+  /// problem is visible immediately instead of at push time.
+  Future<void> _diagnoseWorkingDir(String dir) async {
+    if (dir.trim().isEmpty) return;
+    final problems = await WorkspaceProbe.diagnose(dir);
+    if (!mounted || problems.isEmpty) return;
+
+    _addLog('Workspace check: $dir', LogLevel.info);
+    for (final problem in problems) {
+      _addLog('[WORKSPACE] $problem', LogLevel.warning);
+    }
+  }
+
   Future<void> _handleBrowse() async {
     final selected = await showDialog<String>(
       context: context,
@@ -105,6 +122,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
       await StorageService.saveDirectory(selected);
       widget.onDirectoryChanged(selected);
       _addLog('Changed working directory to: $selected', LogLevel.info);
+      await _diagnoseWorkingDir(selected);
     }
   }
 
