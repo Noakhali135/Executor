@@ -196,7 +196,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
 
     // Pre-flight the workspace: pushing to a folder Android will not let us
     // read used to fail with a bare "No files found to push to GitHub".
-    final probe = await WorkspaceProbe.scan(widget.workingDir, maxFiles: 200);
+    final probe = await WorkspaceProbe.scanForPush(widget.workingDir, maxFiles: 200);
     if (probe.files.isEmpty) {
       final problems = await WorkspaceProbe.diagnose(widget.workingDir);
       for (final problem in problems) {

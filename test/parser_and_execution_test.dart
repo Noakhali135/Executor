@@ -285,9 +285,9 @@ void main() {
 
       final scan = await WorkspaceProbe.scan(tempRoot.path);
 
-      expect(scan.files.map((f) => p.basename(f.path)).toSet(),
+      expect(scan.files.map((f) => f.name).toSet(),
           containsAll({'main.dart', 'pubspec.yaml'}));
-      expect(scan.files.map((f) => p.basename(f.path)), isNot(contains('junk.o')));
+      expect(scan.files.map((f) => f.name), isNot(contains('junk.o')));
       expect(scan.skippedIgnored, greaterThan(0));
       expect(scan.looksLikePermissionProblem, isFalse);
     });
@@ -334,7 +334,7 @@ void main() {
         tempRoot.path,
         specificPaths: {nested.path},
       );
-      expect(scan.files.map((f) => p.basename(f.path)), ['a.txt']);
+      expect(scan.files.map((f) => f.name), ['a.txt']);
     });
 
     test('canonical() never throws on a missing path', () {

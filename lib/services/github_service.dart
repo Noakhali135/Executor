@@ -90,15 +90,12 @@ class RepoAccess {
   });
 }
 
-/// A file whose bytes will be uploaded.
-class _LocalFileToUpload {
-  final File file;
+/// A file queued for upload, carrying its workspace-relative path.
+class _PendingUpload {
+  final WorkspaceFile file;
   final String relPath;
 
-  const _LocalFileToUpload({
-    required this.file,
-    required this.relPath,
-  });
+  const _PendingUpload({required this.file, required this.relPath});
 }
 
 class _DigestSink implements Sink<Digest> {
@@ -240,11 +237,13 @@ class GitHubService {
   ///
   /// Previously every file was fully read and retained, so a large workspace
   /// could exhaust phone memory before the first upload.
-  static Future<String> _calculateGitBlobShaStreaming(File file) async {
+  static Future<String> _calculateGitBlobShaStreaming(WorkspaceFile file) async {
     final length = await file.length();
     final sink = _DigestSink();
     final hasher = sha1.startChunkedConversion(sink);
     hasher.add(utf8.encode('blob $length\x00'));
+    // openRead() streams for direct files and yields a single chunk when the
+    // bytes come from MediaStore.
     await for (final chunk in file.openRead()) {
       hasher.add(chunk);
     }
@@ -876,7 +875,7 @@ class GitHubService {
       }
 
       final treeNodes = <Map<String, dynamic>>[];
-      final filesToUpload = <_LocalFileToUpload>[];
+      final filesToUpload = <_PendingUpload>[];
       int totalScannedBytes = 0;
       int totalUploadBytes = 0;
       int newCount = 0;
@@ -891,7 +890,7 @@ class GitHubService {
         final length = await file.length();
         if (length > maxBlobBytes) {
           onLog(
-            'Skipped ${p.basename(file.path)} (${_formatBytes(length)}) — exceeds the ${_formatBytes(maxBlobBytes)} per-file limit.',
+            'Skipped ${file.name} (${_formatBytes(length)}) — exceeds the ${_formatBytes(maxBlobBytes)} per-file limit.',
             LogLevel.warning,
           );
           skippedTooLarge++;
@@ -917,7 +916,7 @@ class GitHubService {
             modifiedCount++;
           }
           totalUploadBytes += length;
-          filesToUpload.add(_LocalFileToUpload(file: file, relPath: relPath));
+          filesToUpload.add(_PendingUpload(file: file, relPath: relPath));
         }
 
         if (i % 25 == 0) await Future.delayed(Duration.zero);
@@ -951,7 +950,7 @@ class GitHubService {
       int processedCounter = 0;
       GitHubAuthException? authFailure;
 
-      await _runSlidingPool<_LocalFileToUpload>(
+      await _runSlidingPool<_PendingUpload>(
         items: filesToUpload,
         concurrency: 16,
         worker: (item) async {
@@ -1204,12 +1203,12 @@ class GitHubService {
   /// Uses [WorkspaceProbe], which survives individual unreadable entries
   /// instead of aborting the whole walk, and reports *why* nothing was found
   /// rather than logging a bare "No files found".
-  static Future<List<File>> _collectFiles({
+  static Future<List<WorkspaceFile>> _collectFiles({
     required String workingDir,
     Set<String>? specificPaths,
     required Function(String message, LogLevel level) onLog,
   }) async {
-    final scan = await WorkspaceProbe.scan(workingDir, specificPaths: specificPaths);
+    final scan = await WorkspaceProbe.scanForPush(workingDir, maxFiles: 5000);
 
     onLog(
       'Scanned ${scan.directoryCount} folder(s) and found ${scan.files.length} file(s)'
@@ -1227,7 +1226,18 @@ class GitHubService {
       }
     }
 
+    if (scan.usedMediaStore && scan.files.isNotEmpty) {
+      onLog(
+        '[ACCESS] Plain file access is blocked here; read ${scan.files.length} '
+        'file(s) through Android MediaStore instead.',
+        LogLevel.warning,
+      );
+    }
+
     if (scan.files.isEmpty) {
+      if (scan.mediaStoreFailure != null) {
+        onLog('[MEDIASTORE] ${scan.mediaStoreFailure!}', LogLevel.warning);
+      }
       if (scan.looksLikePermissionProblem) {
         // Folders visible, contents invisible: scoped storage, not an empty
         // project. Say so instead of leaving the user guessing.
