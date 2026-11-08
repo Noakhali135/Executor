@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import '../services/file_types.dart';
+import '../services/saf_workspace.dart';
+import '../services/workspace_fs.dart';
 import 'html_preview_widget.dart';
 
 class FileEditorDialog extends StatefulWidget {
@@ -43,6 +45,8 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
   static bool _isImagePath(String path) => FileTypes.isImage(path);
 
   static bool _isBinaryPath(String path) => FileTypes.hasBinaryExtension(path);
+
+  bool get _isSaf => SafWorkspace.isSafPath(widget.filePath);
 
   bool get _isHtml {
     final ext = p.extension(widget.filePath).toLowerCase();
@@ -125,16 +129,14 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
   }
 
   Future<void> _loadFileContent() async {
-    final file = File(widget.filePath);
-    if (!await file.exists()) {
+    if (!await WorkspaceFs.exists(widget.filePath)) {
       if (mounted) Navigator.pop(context);
       return;
     }
 
-    final length = await file.length();
-    _fileSizeBytes = length;
+    _fileSizeBytes = await WorkspaceFs.length(widget.filePath);
 
-    if (_isImagePath(widget.filePath)) {
+    if (_isImagePath(widget.filePath) && !_isSaf) {
       if (mounted) {
         setState(() {
           _isImage = true;
@@ -154,52 +156,32 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
       return;
     }
 
-    try {
-      final text = await file.readAsString();
-      if (mounted) {
-        setState(() {
-          _savedContent = text;
-          _isPerformingUndoRedo = true;
-          _codeController.text = text;
-          _undoStack.clear();
-          _undoStack.add(text);
-          _redoStack.clear();
-          _isPerformingUndoRedo = false;
-          _isDirty = false;
-          _isLoading = false;
-          _lineCount = text.isEmpty ? 1 : text.split('\n').length;
-          _charCount = text.length;
-        });
-      }
-    } catch (_) {
-      try {
-        final bytes = await file.readAsBytes();
-        final text = String.fromCharCodes(bytes);
-        if (mounted) {
-          setState(() {
-            _savedContent = text;
-            _isPerformingUndoRedo = true;
-            _codeController.text = text;
-            _undoStack.clear();
-            _undoStack.add(text);
-            _redoStack.clear();
-            _isPerformingUndoRedo = false;
-            _isDirty = false;
-            _isLoading = false;
-            _lineCount = text.isEmpty ? 1 : text.split('\n').length;
-            _charCount = text.length;
-          });
-        }
-      } catch (_) {
-        if (mounted) {
-          setState(() {
-            _isBinary = true;
-            _isLoading = false;
-          });
-        }
-      }
+    final text = await WorkspaceFs.readString(widget.filePath);
+    if (!mounted) return;
+
+    if (text == null) {
+      setState(() {
+        _isBinary = true;
+        _isLoading = false;
+      });
+      return;
     }
+
+    setState(() {
+      _savedContent = text;
+      _isPerformingUndoRedo = true;
+      _codeController.text = text;
+      _undoStack.clear();
+      _undoStack.add(text);
+      _redoStack.clear();
+      _isPerformingUndoRedo = false;
+      _isDirty = false;
+      _isLoading = false;
+      _lineCount = text.isEmpty ? 1 : text.split('\n').length;
+      _charCount = text.length;
+    });
   }
+
 
   /// Asks before discarding unsaved edits.
   Future<bool> _confirmDiscard() async {
@@ -246,9 +228,11 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
     setState(() => _isSaving = true);
 
     try {
-      final file = File(widget.filePath);
-      await file.writeAsString(_codeController.text);
-      final len = await file.length();
+      final ok = await WorkspaceFs.writeString(widget.filePath, _codeController.text);
+      if (!ok) {
+        throw FileSystemException('Write failed', widget.filePath);
+      }
+      final len = await WorkspaceFs.length(widget.filePath);
       if (mounted) {
         setState(() {
           _savedContent = _codeController.text;

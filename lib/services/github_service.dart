@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/command_action.dart';
+import 'saf_workspace.dart';
 import 'secure_store.dart';
 import 'workspace_probe.dart';
 
@@ -885,7 +886,9 @@ class GitHubService {
 
       for (int i = 0; i < files.length; i++) {
         final file = files[i];
-        final relPath = p.relative(file.path, from: workingDir).replaceAll(r'\', '/');
+        final relPath = SafWorkspace.isSafPath(file.path)
+            ? file.path.substring(workingDir.length + 1)
+            : p.relative(file.path, from: workingDir).replaceAll(r'\', '/');
 
         final length = await file.length();
         if (length > maxBlobBytes) {
@@ -1208,7 +1211,9 @@ class GitHubService {
     Set<String>? specificPaths,
     required Function(String message, LogLevel level) onLog,
   }) async {
-    final scan = await WorkspaceProbe.scanForPush(workingDir, maxFiles: 5000);
+    final scan = specificPaths != null && specificPaths.isNotEmpty
+        ? await WorkspaceProbe.scan(workingDir, maxFiles: 5000, specificPaths: specificPaths)
+        : await WorkspaceProbe.scanForPush(workingDir, maxFiles: 5000);
 
     onLog(
       'Scanned ${scan.directoryCount} folder(s) and found ${scan.files.length} file(s)'
@@ -1224,6 +1229,14 @@ class GitHubService {
       for (final error in scan.errors) {
         onLog('  $error', LogLevel.warning);
       }
+    }
+
+    if (scan.viaSaf && scan.files.isNotEmpty) {
+      onLog(
+        '[ACCESS] Reading ${scan.files.length} file(s) through the granted folder '
+        '(Storage Access Framework) — no storage permission required.',
+        LogLevel.success,
+      );
     }
 
     if (scan.usedMediaStore && scan.files.isNotEmpty) {

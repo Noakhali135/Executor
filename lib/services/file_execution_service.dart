@@ -3,6 +3,7 @@ import 'package:path/path.dart' as p;
 import '../models/command_action.dart';
 import 'file_types.dart';
 import 'path_guard.dart';
+import 'workspace_fs.dart';
 
 /// One planned action, resolved and validated before anything touches disk.
 class PlannedAction {
@@ -93,15 +94,12 @@ class FileExecutionService {
     }
 
     emit('Checking working directory: $rootDir', LogLevel.info);
-    final baseDir = Directory(rootDir);
-    if (!await baseDir.exists()) {
-      try {
-        await baseDir.create(recursive: true);
-        emit('Working directory created: $rootDir', LogLevel.warning);
-      } catch (e) {
-        emit('Unable to access working directory: $e', LogLevel.error);
+    if (!await WorkspaceFs.exists(rootDir)) {
+      if (!await WorkspaceFs.createDirectory(rootDir)) {
+        emit('Unable to access working directory: $rootDir', LogLevel.error);
         return logs;
       }
+      emit('Working directory created: $rootDir', LogLevel.warning);
     }
 
     final plan = FileExecutionService.plan(rootDir: rootDir, actions: actions);
@@ -138,12 +136,10 @@ class FileExecutionService {
       try {
         switch (action.type) {
           case ActionType.createFile:
-            final parent = Directory(targetFolder);
-            if (!await parent.exists()) {
-              await parent.create(recursive: true);
+            final ok = await WorkspaceFs.writeString(targetFullPath, action.content);
+            if (!ok) {
+              throw FileSystemException('Could not write', targetFullPath);
             }
-            final file = File(targetFullPath);
-            await file.writeAsString(action.content);
             emit(
               '[CREATE_FILE] ${action.fullRelativePath} (${action.content.length} chars)',
               LogLevel.success,
@@ -152,9 +148,9 @@ class FileExecutionService {
             break;
 
           case ActionType.deleteFile:
-            final file = File(targetFullPath);
-            if (await file.exists()) {
-              await file.delete();
+            if (await WorkspaceFs.exists(targetFullPath) &&
+                !await WorkspaceFs.isDirectory(targetFullPath)) {
+              await WorkspaceFs.delete(targetFullPath);
               emit('[DELETE_FILE] ${action.fullRelativePath} removed', LogLevel.success);
               successCount++;
             } else {
@@ -169,28 +165,26 @@ class FileExecutionService {
             break;
 
           case ActionType.createFolder:
-            final dir = Directory(targetFullPath);
-            if (!await dir.exists()) {
-              await dir.create(recursive: true);
-            }
+            await WorkspaceFs.createDirectory(targetFullPath);
             emit('[CREATE_FOLDER] ${action.fullRelativePath}/ created', LogLevel.success);
             successCount++;
             break;
 
           case ActionType.deleteFolder:
-            final dir = Directory(targetFullPath);
-            if (await dir.exists()) {
+            if (await WorkspaceFs.isDirectory(targetFullPath)) {
               // Never follow a symlink out of the workspace.
-              final resolved = await dir.resolveSymbolicLinks();
-              if (!PathGuard.isInside(rootDir, resolved)) {
-                emit(
-                  '[BLOCKED] ${action.fullRelativePath} resolves outside the workspace (symlink)',
-                  LogLevel.error,
-                );
-                failCount++;
-                break;
+              if (!WorkspaceFs.isSaf(targetFullPath)) {
+                final resolved = await Directory(targetFullPath).resolveSymbolicLinks();
+                if (!PathGuard.isInside(rootDir, resolved)) {
+                  emit(
+                    '[BLOCKED] ${action.fullRelativePath} resolves outside the workspace (symlink)',
+                    LogLevel.error,
+                  );
+                  failCount++;
+                  break;
+                }
               }
-              await dir.delete(recursive: true);
+              await WorkspaceFs.delete(targetFullPath);
               emit('[DELETE_FOLDER] ${action.fullRelativePath}/ deleted', LogLevel.success);
               successCount++;
             } else {

@@ -5,6 +5,8 @@ import 'package:executor/services/command_parser_service.dart';
 import 'package:executor/services/export_service.dart';
 import 'package:executor/services/file_execution_service.dart';
 import 'package:executor/services/github_service.dart';
+import 'package:executor/services/saf_workspace.dart';
+import 'package:executor/services/workspace_fs.dart';
 import 'package:executor/services/workspace_probe.dart';
 import 'package:executor/services/path_guard.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -339,6 +341,45 @@ void main() {
 
     test('canonical() never throws on a missing path', () {
       expect(WorkspaceProbe.canonical(p.join(tempRoot.path, 'nope')), isNotEmpty);
+    });
+  });
+
+  group('SAF virtual paths', () {
+    const tree = '/devrunner-saf/primary:Download/app';
+
+    test('recognises virtual paths', () {
+      expect(SafWorkspace.isSafPath(tree), isTrue);
+      expect(SafWorkspace.isSafPath('/storage/emulated/0/Download'), isFalse);
+    });
+
+    test('splits tree id from the relative remainder', () {
+      final parts = SafWorkspace.split('$tree/lib/src');
+      expect(parts.treeId, 'primary:Download/app');
+      expect(parts.relative, 'lib/src');
+    });
+
+    test('PathGuard contains SAF paths and still blocks traversal', () {
+      final ok = PathGuard.resolveInRoot(tree, relativePath: '/lib/', name: 'a.dart');
+      expect(ok, '$tree/lib/a.dart');
+      expect(PathGuard.isInside(tree, ok), isTrue);
+
+      expect(
+        () => PathGuard.resolveInRoot(tree, relativePath: '/../../', name: 'x'),
+        throwsA(isA<UnsafePathException>()),
+      );
+    });
+
+    test('joinSaf rejects traversal attempts', () {
+      expect(WorkspaceFs.joinSaf(tree, '/lib/', 'a.dart'), '$tree/lib/a.dart');
+      expect(
+        () => WorkspaceFs.joinSaf(tree, '/../etc/', 'passwd'),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('WorkspaceFs identifies SAF paths without touching the platform', () {
+      expect(WorkspaceFs.isSaf(tree), isTrue);
+      expect(WorkspaceFs.isSaf('/tmp/plain'), isFalse);
     });
   });
 }

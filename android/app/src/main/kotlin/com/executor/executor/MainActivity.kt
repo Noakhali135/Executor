@@ -1,6 +1,7 @@
 package com.executor.executor
 
 import android.content.ContentUris
+import android.content.Intent
 import android.os.Build
 import android.provider.MediaStore
 import io.flutter.embedding.android.FlutterActivity
@@ -26,6 +27,19 @@ import java.io.File
 class MainActivity : FlutterActivity() {
 
     private val channelName = "devrunner/native"
+
+    private lateinit var saf: SafWorkspace
+
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        saf = SafWorkspace(this)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        // The SAF picker resolves through here before Flutter sees anything.
+        if (::saf.isInitialized) saf.onActivityResult(requestCode, resultCode, data)
+        super.onActivityResult(requestCode, resultCode, data)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -69,6 +83,91 @@ class MainActivity : FlutterActivity() {
                             } else {
                                 result.success(bytes)
                             }
+                        }
+                    }
+
+                    // ---- Storage Access Framework -----------------------
+                    "pickDirectory" -> saf.pickDirectory(result)
+
+                    "listGrantedTrees" -> result.success(saf.listTrees())
+
+                    "forgetTree" -> {
+                        val treeId = call.argument<String>("treeId")
+                        if (treeId == null) {
+                            result.error("bad_args", "treeId is required", null)
+                        } else {
+                            saf.forgetTree(treeId)
+                            result.success(true)
+                        }
+                    }
+
+                    "listSafFiles" -> {
+                        val path = call.argument<String>("path")
+                        val maxFiles = call.argument<Int>("maxFiles") ?: 5000
+                        if (path == null) {
+                            result.error("bad_args", "path is required", null)
+                        } else {
+                            result.success(saf.listTree(path, maxFiles))
+                        }
+                    }
+
+                    "readSafFile" -> {
+                        val path = call.argument<String>("path")
+                        if (path == null) {
+                            result.error("bad_args", "path is required", null)
+                        } else {
+                            val bytes = saf.readFile(path)
+                            if (bytes == null) {
+                                result.error("not_found", "Could not read $path", null)
+                            } else {
+                                result.success(bytes)
+                            }
+                        }
+                    }
+
+                    "writeSafFile" -> {
+                        val path = call.argument<String>("path")
+                        val bytes = call.argument<ByteArray>("bytes")
+                        if (path == null || bytes == null) {
+                            result.error("bad_args", "path and bytes are required", null)
+                        } else {
+                            result.success(saf.writeFile(path, bytes))
+                        }
+                    }
+
+                    "listSafChildren" -> {
+                        val path = call.argument<String>("path")
+                        if (path == null) {
+                            result.error("bad_args", "path is required", null)
+                        } else {
+                            result.success(saf.listChildren(path))
+                        }
+                    }
+
+                    "createSafDirectory" -> {
+                        val path = call.argument<String>("path")
+                        if (path == null) {
+                            result.error("bad_args", "path is required", null)
+                        } else {
+                            result.success(saf.createDirectory(path))
+                        }
+                    }
+
+                    "deleteSafPath" -> {
+                        val path = call.argument<String>("path")
+                        if (path == null) {
+                            result.error("bad_args", "path is required", null)
+                        } else {
+                            result.success(saf.deletePath(path))
+                        }
+                    }
+
+                    "safDescribe" -> {
+                        val path = call.argument<String>("path")
+                        if (path == null) {
+                            result.error("bad_args", "path is required", null)
+                        } else {
+                            result.success(saf.describe(path))
                         }
                     }
 

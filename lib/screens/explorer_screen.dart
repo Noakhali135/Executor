@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import '../models/tree_node.dart';
 import '../services/export_service.dart';
+import '../services/saf_workspace.dart';
+import '../services/workspace_fs.dart';
 import '../services/workspace_probe.dart';
 import '../widgets/file_editor_dialog.dart';
 
@@ -81,8 +83,7 @@ class ExplorerScreenState extends State<ExplorerScreen> {
       return;
     }
 
-    final rootDir = Directory(widget.workingDir);
-    if (!await rootDir.exists()) {
+    if (!await WorkspaceFs.exists(widget.workingDir)) {
       setState(() {
         _rootNodes = [];
       });
@@ -114,40 +115,30 @@ class ExplorerScreenState extends State<ExplorerScreen> {
   }
 
   Future<List<TreeNode>> _scanChildren(String dirPath, int depth) async {
-    final dir = Directory(dirPath);
-    if (!await dir.exists()) return [];
-
     final nodes = <TreeNode>[];
-    var failures = 0;
 
     try {
-      await for (final entity in dir.list(followLinks: false)) {
-        final name = p.basename(entity.path);
-        // Hidden entries are only hidden on request: .github/, .env and
-        // .gitignore are legitimate parts of a project and used to be
-        // unreachable from the explorer entirely.
-        if (!_showHidden && name.startsWith('.')) continue;
-
+      // WorkspaceFs handles both normal paths and granted SAF trees, so the
+      // explorer works on a folder selected through the system picker.
+      final entries = await WorkspaceFs.listDirectory(dirPath);
+      for (final entry in entries) {
+        if (!_showHidden && entry.name.startsWith('.')) continue;
         nodes.add(TreeNode(
-          fullPath: entity.path,
-          name: name,
-          isDirectory: entity is Directory,
+          fullPath: entry.path,
+          name: entry.name,
+          isDirectory: entry.isDirectory,
           depth: depth,
         ));
       }
+      if (mounted && _scanError != null) {
+        setState(() => _scanError = null);
+      }
     } catch (e) {
-      // Distinguish "empty folder" from "cannot read folder". Previously both
-      // produced an empty list with no explanation.
-      failures++;
       if (mounted) {
         setState(() {
           _scanError = 'Cannot read ${p.basename(dirPath)}: ${_describeError(e)}';
         });
       }
-    }
-
-    if (failures == 0 && _scanError != null && mounted) {
-      setState(() => _scanError = null);
     }
 
     nodes.sort((a, b) {
@@ -322,16 +313,16 @@ class ExplorerScreenState extends State<ExplorerScreen> {
   }
 
   Future<void> _collectRecursive(String targetPath, bool isDir, Set<String> into) async {
-    final normTarget = p.normalize(targetPath);
-    into.add(normTarget);
+    final normalized = WorkspaceFs.isSaf(targetPath)
+        ? targetPath
+        : p.normalize(targetPath);
+    into.add(normalized);
     if (!isDir) return;
     try {
-      final d = Directory(normTarget);
-      if (await d.exists()) {
-        await for (final entity in d.list(recursive: true, followLinks: false)) {
-          if (_showHidden || !p.basename(entity.path).startsWith('.')) {
-            into.add(p.normalize(entity.path));
-          }
+      final entries = await WorkspaceFs.listDirectory(normalized, recursive: true);
+      for (final entry in entries) {
+        if (_showHidden || !entry.name.startsWith('.')) {
+          into.add(WorkspaceFs.isSaf(entry.path) ? entry.path : p.normalize(entry.path));
         }
       }
     } catch (_) {}
@@ -597,11 +588,13 @@ class ExplorerScreenState extends State<ExplorerScreen> {
               onPressed: () async {
                 final name = _createNameController.text.trim();
                 if (name.isNotEmpty) {
-                  final target = p.join(widget.workingDir, name);
+                  final target = WorkspaceFs.isSaf(widget.workingDir)
+                      ? '${widget.workingDir}/$name'
+                      : p.join(widget.workingDir, name);
                   if (isFolder) {
-                    await Directory(target).create(recursive: true);
+                    await WorkspaceFs.createDirectory(target);
                   } else {
-                    await File(target).writeAsString('');
+                    await WorkspaceFs.writeString(target, '');
                   }
                   await _loadDirectoryTree();
                 }

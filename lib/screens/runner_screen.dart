@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import '../models/command_action.dart';
 import '../services/command_parser_service.dart';
 import '../services/file_execution_service.dart';
+import '../services/saf_workspace.dart';
 import '../services/storage_service.dart';
 import '../services/workspace_probe.dart';
 import '../widgets/directory_picker_dialog.dart';
@@ -549,9 +550,19 @@ class _RunnerScreenState extends State<RunnerScreen> {
   }
 
   Widget _buildWorkingDirectoryCard() {
+    // SAF workspaces live at a virtual path; show something a human reads.
+    String friendlyPath(String path) {
+      if (!SafWorkspace.isSafPath(path)) return path;
+      final parts = SafWorkspace.split(path);
+      final relative = parts.relative;
+      return relative.isEmpty
+          ? 'Granted folder (${parts.treeId.split(':').last})'
+          : 'Granted folder: ${parts.treeId.split(':').last}/$relative';
+    }
+
     final pathDisplay = widget.workingDir.isEmpty
         ? 'No directory selected. Tap Browse...'
-        : widget.workingDir;
+        : friendlyPath(widget.workingDir);
 
     return Container(
       decoration: BoxDecoration(

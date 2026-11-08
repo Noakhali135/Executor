@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import 'saf_workspace.dart';
 import 'storage_service.dart';
 
 /// Directories that are never worth pushing and are usually enormous.
@@ -31,11 +32,16 @@ class WorkspaceFile {
 
   Future<int> length() async {
     if (size >= 0) return size;
-    if (viaMediaStore) return (await readAsBytes()).length;
+    if (viaMediaStore || SafWorkspace.isSafPath(path)) {
+      return (await readAsBytes()).length;
+    }
     return File(path).length();
   }
 
   Future<Uint8List> readAsBytes() async {
+    if (SafWorkspace.isSafPath(path)) {
+      return await SafWorkspace.readFile(path) ?? Uint8List(0);
+    }
     if (viaMediaStore) {
       try {
         final bytes = await WorkspaceProbe.android.invokeMethod<Uint8List>(
@@ -51,6 +57,10 @@ class WorkspaceFile {
   }
 
   Stream<List<int>> openRead() async* {
+    if (SafWorkspace.isSafPath(path)) {
+      yield await readAsBytes();
+      return;
+    }
     if (viaMediaStore) {
       yield await readAsBytes();
       return;
@@ -73,6 +83,9 @@ class WorkspaceScan {
   /// Reason the MediaStore fallback was unavailable/unsuccessful, if any.
   final String? mediaStoreFailure;
 
+  /// True when the files came from a granted SAF tree.
+  final bool viaSaf;
+
   const WorkspaceScan({
     required this.files,
     required this.directoryCount,
@@ -81,6 +94,7 @@ class WorkspaceScan {
     required this.errors,
     this.usedMediaStore = false,
     this.mediaStoreFailure,
+    this.viaSaf = false,
   });
 
   static const WorkspaceScan empty = WorkspaceScan(
@@ -139,6 +153,11 @@ class WorkspaceProbe {
     int maxFiles = 5000,
     Set<String>? specificPaths,
   }) async {
+    // SAF trees are readable regardless of scoped storage, so use them first.
+    if (SafWorkspace.isSafPath(root)) {
+      return scanSaf(root, maxFiles: maxFiles);
+    }
+
     final files = <WorkspaceFile>[];
     final errors = <String>[];
     var directoryCount = 0;
@@ -213,6 +232,36 @@ class WorkspaceProbe {
       unreadableEntries: unreadable,
       skippedIgnored: skippedIgnored,
       errors: errors,
+    );
+  }
+
+  /// Walks a granted SAF tree.
+  ///
+  /// No permission check is involved: a persisted `OPEN_DOCUMENT_TREE` grant
+  /// is full read/write access to that folder for as long as the user keeps it.
+  static Future<WorkspaceScan> scanSaf(String root, {int maxFiles = 5000}) async {
+    final rows = await SafWorkspace.listFiles(root, maxFiles: maxFiles);
+    final files = <WorkspaceFile>[];
+    var skippedIgnored = 0;
+
+    for (final row in rows) {
+      final path = row['path'] as String?;
+      if (path == null) continue;
+      if (isIgnored(path)) {
+        skippedIgnored++;
+        continue;
+      }
+      files.add(WorkspaceFile(path, size: (row['size'] as int?) ?? -1));
+    }
+
+    return WorkspaceScan(
+      files: files,
+      directoryCount: 1,
+      unreadableEntries: 0,
+      skippedIgnored: skippedIgnored,
+      errors: const [],
+      viaSaf: true,
+      mediaStoreFailure: files.isEmpty ? 'The granted folder contains no files.' : null,
     );
   }
 
@@ -302,6 +351,8 @@ class WorkspaceProbe {
 
   /// The scan a push should use: plain filesystem first, then MediaStore.
   static Future<WorkspaceScan> scanForPush(String root, {int maxFiles = 5000}) async {
+    if (SafWorkspace.isSafPath(root)) return scanSaf(root, maxFiles: maxFiles);
+
     final direct = await scan(root, maxFiles: maxFiles);
     if (direct.files.isNotEmpty) return direct;
     if (!direct.looksLikePermissionProblem) return direct;
@@ -323,6 +374,14 @@ class WorkspaceProbe {
   /// Returns an empty list when the workspace is usable.
   static Future<List<String>> diagnose(String path) async {
     final problems = <String>[];
+
+    if (SafWorkspace.isSafPath(path)) {
+      final scan = await scanSaf(path, maxFiles: 200);
+      if (scan.files.isEmpty) {
+        problems.add('The granted folder contains no readable files.');
+      }
+      return problems;
+    }
 
     if (!await Directory(path).exists()) {
       problems.add('Directory does not exist: $path');

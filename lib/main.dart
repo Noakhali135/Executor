@@ -3,7 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'screens/runner_screen.dart';
 import 'screens/explorer_screen.dart';
+import 'services/saf_workspace.dart';
 import 'services/storage_service.dart';
+import 'services/workspace_fs.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -77,7 +79,11 @@ class _MainShellScreenState extends State<MainShellScreen> {
     if (savedPath != null && savedPath.isNotEmpty) {
       // Only reuse a saved directory that still exists, so a stale path (or an
       // SD card that was removed) cannot leave the Runner pointing at nothing.
-      if (Directory(savedPath).existsSync()) {
+      // A SAF path is validated through the persisted grant, not dart:io.
+      final stillUsable = SafWorkspace.isSafPath(savedPath)
+          ? await WorkspaceFs.exists(savedPath)
+          : Directory(savedPath).existsSync();
+      if (stillUsable) {
         if (mounted) setState(() => _workingDir = savedPath);
         return;
       }

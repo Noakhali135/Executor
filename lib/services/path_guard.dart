@@ -1,5 +1,7 @@
 import 'package:path/path.dart' as p;
 
+import 'saf_workspace.dart';
+
 /// Thrown whenever a requested path would escape the workspace root.
 class UnsafePathException implements Exception {
   final String reason;
@@ -35,10 +37,31 @@ class PathGuard {
   /// The root itself is *not* considered inside, which prevents an action from
   /// replacing or deleting the workspace directory.
   static bool isInside(String root, String candidate) {
+    // SAF trees are virtual paths; compare them with posix semantics so the
+    // containment guarantee holds for granted folders as well.
+    if (SafWorkspace.isSafPath(root)) {
+      final r = _posixNormalize(root);
+      final c = _posixNormalize(candidate);
+      if (r == c) return false;
+      return c.startsWith('$r/');
+    }
     final r = normalizeRoot(root);
     final c = p.normalize(p.absolute(candidate));
     if (p.equals(r, c)) return false;
     return p.isWithin(r, c);
+  }
+
+  static String _posixNormalize(String path) {
+    final parts = <String>[];
+    for (final segment in path.replaceAll(r'\', '/').split('/')) {
+      if (segment.isEmpty || segment == '.') continue;
+      if (segment == '..') {
+        if (parts.isNotEmpty) parts.removeLast();
+        continue;
+      }
+      parts.add(segment);
+    }
+    return '/${parts.join('/')}';
   }
 
   /// Validates a single file/folder name coming from `[NAME]:`.
@@ -68,11 +91,26 @@ class PathGuard {
     required String relativePath,
     required String name,
   }) {
-    final root = normalizeRoot(rootDir);
+    final root = SafWorkspace.isSafPath(rootDir) ? rootDir : normalizeRoot(rootDir);
 
     final nameError = validateName(name);
     if (nameError != null) {
       throw UnsafePathException(nameError, attemptedPath: name);
+    }
+
+    if (SafWorkspace.isSafPath(rootDir)) {
+      // Virtual SAF path: build it with posix join and verify containment.
+      final cleaned = _cleanRelative(relativePath);
+      final candidate = _posixNormalize(
+        cleaned.isEmpty ? '$root/${name.trim()}' : '$root/$cleaned/${name.trim()}',
+      );
+      if (!isInside(root, candidate)) {
+        throw UnsafePathException(
+          'Path escapes the workspace root',
+          attemptedPath: p.join(relativePath, name),
+        );
+      }
+      return candidate;
     }
 
     final cleanedRelative = _cleanRelative(relativePath);

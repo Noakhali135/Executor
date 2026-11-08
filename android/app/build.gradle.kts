@@ -48,3 +48,10 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // AndroidX DocumentFile: wraps SAF trees/children as java.io.File-compatible
+    // objects, so the whole dart:io scanning code can stay as it is when a
+    // workspace was granted through the Storage Access Framework.
+    implementation("androidx.documentfile:documentfile:1.0.1")
+}

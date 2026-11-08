@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
+import '../services/saf_workspace.dart';
 import '../services/storage_service.dart';
 
 class DirectoryPickerDialog extends StatefulWidget {
@@ -22,6 +23,7 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
   List<Directory> _subDirectories = [];
   bool _isLoading = false;
   bool _hasBroadAccess = true;
+  List<SafTree> _grantedTrees = const [];
 
   final List<String> _shortcuts = [
     '/storage/emulated/0',
@@ -33,6 +35,8 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
 
   Future<void> _bootstrap() async {
     final hasAccess = await StorageService.hasBroadStorageAccess();
+    final trees = await SafWorkspace.grantedTrees();
+    if (mounted) setState(() => _grantedTrees = trees);
 
     String startPath = widget.initialPath.trim();
     if (startPath.isEmpty || !Directory(startPath).existsSync()) {
@@ -122,6 +126,25 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
     // trigger a system dialog. Access is requested only from the explicit
     // "grant access" action below.
     _bootstrap();
+  }
+
+  /// Opens the system SAF picker. This is the recommended path: the grant
+  /// persists across reboots and needs no storage permission at all.
+  Future<void> _pickWithSaf() async {
+    final tree = await SafWorkspace.pickDirectory();
+    if (!mounted) return;
+    if (tree == null) return;
+
+    final trees = await SafWorkspace.grantedTrees();
+    if (!mounted) return;
+    setState(() => _grantedTrees = trees);
+    Navigator.pop(context, tree.virtualPath);
+  }
+
+  Future<void> _refreshTrees() async {
+    final trees = await SafWorkspace.grantedTrees();
+    if (!mounted) return;
+    setState(() => _grantedTrees = trees);
   }
 
   @override
@@ -219,9 +242,16 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
             onPressed: () async {
               final name = _newFolderController.text.trim();
               if (name.isNotEmpty) {
-                final newDir = Directory(p.join(_currentPath, name));
-                if (!await newDir.exists()) {
-                  await newDir.create(recursive: true);
+                final parent = SafWorkspace.isSafPath(_currentPath)
+                    ? '$_currentPath/$name'
+                    : p.join(_currentPath, name);
+                if (SafWorkspace.isSafPath(_currentPath)) {
+                  await SafWorkspace.createDirectory(parent);
+                } else {
+                  final newDir = Directory(parent);
+                  if (!await newDir.exists()) {
+                    await newDir.create(recursive: true);
+                  }
                 }
                 await _loadDirectories(_currentPath);
               }
@@ -278,6 +308,80 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
                 ],
               ),
             ),
+            // ---- SAF: the recommended way to grant durable folder access --
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+              child: InkWell(
+                onTap: _pickWithSaf,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF132033),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF38BDF8)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.verified_user_outlined, size: 18, color: Color(0xFF38BDF8)),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Choose a folder (recommended)',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            SizedBox(height: 2),
+                            Text(
+                              'Uses Android\'s own folder picker. Access is kept '
+                              'permanently — no "All files access" needed.',
+                              style: TextStyle(color: Color(0xFF94A3B8), fontSize: 11, height: 1.3),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.chevron_right_rounded, color: Color(0xFF38BDF8), size: 20),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+            if (_grantedTrees.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+                child: SizedBox(
+                  height: 32,
+                  child: ListView.builder(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: _grantedTrees.length,
+                    itemBuilder: (ctx, i) {
+                      final tree = _grantedTrees[i];
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: ActionChip(
+                          avatar: const Icon(Icons.folder_special_outlined,
+                              size: 14, color: Color(0xFF38BDF8)),
+                          label: Text(
+                            tree.displayPath.isEmpty ? tree.treeId : tree.displayPath,
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                          backgroundColor: const Color(0xFF0F1523),
+                          side: const BorderSide(color: Color(0xFF1E293B)),
+                          onPressed: () => Navigator.pop(context, tree.virtualPath),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+
             if (!_hasBroadAccess)
               Padding(
                 padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
@@ -296,7 +400,8 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
                         child: InkWell(
                           onTap: _promptForBroadAccess,
                           child: const Text(
-                            'Only the app workspace is writable. Tap to allow access to all files.',
+                            'Browsing by path is limited by Android. Prefer the folder picker above, '
+                            'or tap here for "All files access".',
                             style: TextStyle(color: Color(0xFFC7D2FE), fontSize: 11.5, height: 1.3),
                           ),
                         ),
@@ -493,6 +598,10 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
                   Expanded(
                     child: ElevatedButton.icon(
                       onPressed: () async {
+                        if (SafWorkspace.isSafPath(_currentPath)) {
+                          Navigator.pop(context, _currentPath);
+                          return;
+                        }
                         final writable = await StorageService.canWriteTo(_currentPath);
                         if (!context.mounted) return;
                         if (!writable) {
