@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
@@ -32,12 +31,10 @@ class _PushConflict implements Exception {
 class _LocalFileToUpload {
   final File file;
   final String relPath;
-  final String gitSha;
 
   const _LocalFileToUpload({
     required this.file,
     required this.relPath,
-    required this.gitSha,
   });
 }
 
@@ -453,11 +450,7 @@ class GitHubService {
             modifiedCount++;
           }
           totalUploadBytes += length;
-          filesToUpload.add(_LocalFileToUpload(
-            file: file,
-            relPath: relPath,
-            gitSha: localSha,
-          ));
+          filesToUpload.add(_LocalFileToUpload(file: file, relPath: relPath));
         }
 
         if (i % 25 == 0) await Future.delayed(Duration.zero);
@@ -486,7 +479,6 @@ class GitHubService {
       }
 
       onLog('Streaming ${filesToUpload.length} file(s) across 16 parallel workers...', LogLevel.info);
-      int uploadedCounter = 0;
       int uploadedBytesCounter = 0;
       final failedFiles = <String>[];
       int processedCounter = 0;
@@ -533,7 +525,6 @@ class GitHubService {
             failedFiles.add(item.relPath);
             onLog('Blob upload error for ${item.relPath}: $e', LogLevel.error);
           } finally {
-            uploadedCounter++;
             processedCounter++;
             if (processedCounter % 15 == 0 || processedCounter == filesToUpload.length) {
               onLog(
