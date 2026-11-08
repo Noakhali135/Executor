@@ -84,19 +84,42 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     }
 
     if (mounted) {
-      final target = preferredRepo ?? _selectedRepo;
-      final bool exists = target != null && repos.any((r) => r['name'] == target);
+      final target = (preferredRepo ?? _selectedRepo)?.trim();
+      // Match case-insensitively and trim: GitHub repo names are case
+      // preserving, so a stored "Islamic Routine" and an API "islamic-routine"
+      // (or a stray space from a manual entry) used to fail this lookup and
+      // leave the selection empty — which then surfaced as "please select a
+      // repository first" even though the list had just loaded fine.
+      Map<String, dynamic>? match;
+      if (target != null && target.isNotEmpty) {
+        final lower = target.toLowerCase();
+        for (final repo in repos) {
+          final name = (repo['name'] as String?)?.trim().toLowerCase();
+          if (name == lower) {
+            match = repo;
+            break;
+          }
+        }
+      }
 
-      final match = exists ? repos.firstWhere((r) => r['name'] == target) : null;
       final defaultBranch = (match?['default_branch'] as String?) ?? 'main';
 
       setState(() {
         _userRepos = repos;
-        _selectedRepo = exists ? target : null;
+        _selectedRepo = match?['name'] as String?;
         _selectedRepoDefaultBranch = defaultBranch;
-        if (exists) _branchController.text = defaultBranch;
+        if (_selectedRepo != null) _branchController.text = defaultBranch;
         _isLoadingRepos = false;
       });
+
+      // Make a silently-dropped selection visible instead of failing later.
+      if (target != null && target.isNotEmpty && match == null) {
+        widget.onLog(
+          'Previously selected repository "$target" is not in your repository '
+          'list any more (renamed, deleted, or not visible to this token).',
+          LogLevel.warning,
+        );
+      }
     }
   }
 
@@ -187,12 +210,35 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
         isPrivate: _isPrivate,
         description: 'Created with DevRunner Mobile',
       );
-      if (!created) {
-        widget.onLog('Repository creation note: Repo might already exist, proceeding...', LogLevel.warning);
-      } else {
-        widget.onLog('Repository "$targetRepo" created successfully.', LogLevel.success);
+
+      if (!created.success) {
+        // Stop here rather than pretending and pushing into a repo that does
+        // not exist. This is what used to produce a 404 several steps later.
+        widget.onLog('[CREATE FAILED] ${created.message}', LogLevel.error);
+        if (created.remedy != null) {
+          widget.onLog('[HOW TO FIX] ${created.remedy!}', LogLevel.warning);
+        }
+        if (mounted) {
+          setState(() => _isPushing = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(created.message),
+              backgroundColor: const Color(0xFFDC2626),
+              behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+        return;
       }
-      await GitHubService.saveRepo(targetRepo);
+
+      widget.onLog('[SUCCESS] ${created.message}', LogLevel.success);
+      // Adopt the canonical name GitHub returned (it may differ in casing) and
+      // treat the new repo as the selected one from now on.
+      final canonical = created.repoName ?? targetRepo;
+      await GitHubService.saveRepo(canonical);
+      _selectedRepo = canonical;
+      _branchController.text = 'main';
     } else {
       await GitHubService.saveRepo(targetRepo);
     }
@@ -501,9 +547,11 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
           else
             DropdownButtonFormField<String>(
               value: _selectedRepo,
-              hint: const Text(
-                'Select or create a repository first',
-                style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+              hint: Text(
+                _userRepos.isEmpty
+                    ? 'No repositories found — try "Create New"'
+                    : 'Select a repository',
+                style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
               ),
               dropdownColor: const Color(0xFF111827),
               style: const TextStyle(color: Colors.white, fontSize: 12.5),

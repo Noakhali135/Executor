@@ -40,6 +40,26 @@ class GitHubAuthException implements Exception {
   String toString() => '$message $remedy';
 }
 
+/// Result of attempting to create a repository.
+class CreateRepoResult {
+  final bool success;
+  final String message;
+  final String? remedy;
+  final String? repoName;
+
+  /// True when the only problem is that the repo already exists, which the
+  /// caller can recover from by selecting it instead.
+  final bool alreadyExists;
+
+  const CreateRepoResult({
+    required this.success,
+    required this.message,
+    this.remedy,
+    this.repoName,
+    this.alreadyExists = false,
+  });
+}
+
 /// Asks the user for a fresh token when the stored one is rejected.
 ///
 /// Returning `null` means "not now"; returning a string means the caller
@@ -184,6 +204,23 @@ class GitHubService {
 
   static bool isFineGrainedToken(String token) =>
       token.startsWith('github_pat_');
+
+  /// Percent-encodes one URL path segment.
+  ///
+  /// Repository names may legally contain spaces ("Islamic Routine"), dots and
+  /// other punctuation. Interpolating them raw into a URL truncates the path at
+  /// the first space, which is why pushing to such a repo used to fail with a
+  /// misleading 404 while it appeared fine in the picker.
+  static String _seg(String value) => Uri.encodeComponent(value.trim());
+
+  /// Builds `https://api.github.com/repos/<owner>/<repo><suffix>`.
+  static Uri _repoUri(String owner, String repoName, [String suffix = '']) {
+    return Uri.parse('$_baseUrl/repos/${_seg(owner)}/${_seg(repoName)}$suffix');
+  }
+
+  /// Exposed for tests: the same URL builder the service uses internally.
+  static Uri repoUriForTest(String owner, String repoName, [String suffix = '']) =>
+      _repoUri(owner, repoName, suffix);
 
   static Map<String, String> _headers(String rawToken) {
     final token = sanitizeToken(rawToken);
@@ -354,7 +391,7 @@ class GitHubService {
     final client = http.Client();
     try {
       final res = await client.get(
-        Uri.parse('$_baseUrl/repos/$owner/$repoName'),
+        _repoUri(owner, repoName),
         headers: _headers(token),
       ).timeout(_requestTimeout);
 
@@ -521,7 +558,7 @@ class GitHubService {
     final client = http.Client();
     try {
       final res = await client.get(
-        Uri.parse('$_baseUrl/repos/$owner/$repoName'),
+        _repoUri(owner, repoName),
         headers: _headers(token),
       ).timeout(_requestTimeout);
       if (res.statusCode == 200) {
@@ -536,27 +573,100 @@ class GitHubService {
     return 'main';
   }
 
-  static Future<bool> createRepository({
+  /// Creates a repository.
+  ///
+  /// Returns a typed result instead of a bare bool: "returned false" used to be
+  /// reported as "Repo might already exist, proceeding...", which hid genuine
+  /// failures such as an invalid name, a missing scope or a bad token.
+  static Future<CreateRepoResult> createRepository({
     required String token,
     required String repoName,
     required bool isPrivate,
     required String description,
   }) async {
+    final clean = repoName.trim();
+    if (clean.isEmpty) {
+      return const CreateRepoResult(
+        success: false,
+        message: 'Repository name is empty',
+        remedy: 'Enter a name, e.g. "islamic-routine".',
+      );
+    }
+    if (clean.contains(' ')) {
+      // Spaces in repo names cause nothing but trouble downstream; GitHub
+      // accepts them but they are easy to mistype when selecting later.
+      return const CreateRepoResult(
+        success: false,
+        message: 'Repository names cannot contain spaces: "$clean"',
+        remedy: 'Use hyphens instead, e.g. "islamic-routine".',
+      );
+    }
+
     final client = http.Client();
     try {
       final res = await client.post(
         Uri.parse('$_baseUrl/user/repos'),
         headers: _headers(token),
         body: jsonEncode({
-          'name': repoName.trim(),
+          'name': clean,
           'private': isPrivate,
           'description': description,
           'auto_init': true,
         }),
       ).timeout(_requestTimeout);
-      return res.statusCode == 201;
-    } catch (_) {
-      return false;
+
+      if (res.statusCode == 201) {
+        return CreateRepoResult(
+          success: true,
+          message: 'Repository "$clean" created',
+          repoName: (jsonDecode(res.body)['name'] as String?) ?? clean,
+        );
+      }
+
+      // 422 = name already used by this account (GitHub sends "name already
+      // exists on this account"). That one is genuinely recoverable.
+      if (res.statusCode == 422 && res.body.toLowerCase().contains('already exists')) {
+        return CreateRepoResult(
+          success: false,
+          message: 'Repository "$clean" already exists on your account.',
+          remedy: 'Switch to "Existing Repo" and select it — creation is not needed.',
+          alreadyExists: true,
+          repoName: clean,
+        );
+      }
+
+      if (_isUnauthorized(res)) {
+        return CreateRepoResult(
+          success: false,
+          message: 'The token was rejected (401) while creating the repository.',
+          remedy: 'Reconnect with a token that has the "repo" scope '
+              '(or Contents: Read and write for fine-grained tokens).',
+        );
+      }
+
+      return CreateRepoResult(
+        success: false,
+        message: 'GitHub refused to create "$clean": ${_extractMessage(res)}',
+        remedy: 'Fix the name or the token permissions and try again.',
+      );
+    } on TimeoutException {
+      return const CreateRepoResult(
+        success: false,
+        message: 'Creating the repository timed out.',
+        remedy: 'Check the connection and try again.',
+      );
+    } on SocketException {
+      return const CreateRepoResult(
+        success: false,
+        message: 'Network error while creating the repository.',
+        remedy: 'Check the connection and try again.',
+      );
+    } catch (e) {
+      return CreateRepoResult(
+        success: false,
+        message: 'Could not create the repository: $e',
+        remedy: 'Try again.',
+      );
     } finally {
       client.close();
     }
@@ -743,7 +853,7 @@ class GitHubService {
       final existingRemoteBlobs = <String, String>{};
       if (baseTreeSha != null) {
         final treeFetchRes = await client.get(
-          Uri.parse('$_baseUrl/repos/$owner/$repoName/git/trees/$baseTreeSha?recursive=1'),
+          _repoUri(owner, repoName, '/git/trees/${_seg(baseTreeSha!)}?recursive=1'),
           headers: _headers(token),
         ).timeout(_requestTimeout);
 
@@ -863,7 +973,7 @@ class GitHubService {
             }
 
             final blobRes = await client.post(
-              Uri.parse('$_baseUrl/repos/$owner/$repoName/git/blobs'),
+              _repoUri(owner, repoName, '/git/blobs'),
               headers: _headers(token),
               body: jsonEncode({
                 'content': base64Encode(bytes),
@@ -940,7 +1050,7 @@ class GitHubService {
       if (baseTreeSha != null) treePayload['base_tree'] = baseTreeSha;
 
       final treeRes = await client.post(
-        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/trees'),
+        _repoUri(owner, repoName, '/git/trees'),
         headers: _headers(token),
         body: jsonEncode(treePayload),
       ).timeout(const Duration(seconds: 60));
@@ -962,7 +1072,7 @@ class GitHubService {
       };
 
       final commitRes = await client.post(
-        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/commits'),
+        _repoUri(owner, repoName, '/git/commits'),
         headers: _headers(token),
         body: jsonEncode(commitPayload),
       ).timeout(const Duration(seconds: 60));
@@ -996,7 +1106,7 @@ class GitHubService {
         // meantime the PATCH is rejected and we retry on the fresh head
         // instead of destroying their commits.
         final updateRefRes = await client.patch(
-          Uri.parse('$_baseUrl/repos/$owner/$repoName/git/refs/heads/$branch'),
+          _repoUri(owner, repoName, '/git/refs/heads/${_seg(branch)}'),
           headers: _headers(token),
           body: jsonEncode({'sha': newCommitSha, 'force': false}),
         ).timeout(_requestTimeout);
@@ -1016,7 +1126,7 @@ class GitHubService {
         }
       } else {
         final createRefRes = await client.post(
-          Uri.parse('$_baseUrl/repos/$owner/$repoName/git/refs'),
+          _repoUri(owner, repoName, '/git/refs'),
           headers: _headers(token),
           body: jsonEncode({'ref': 'refs/heads/$branch', 'sha': newCommitSha}),
         ).timeout(_requestTimeout);
@@ -1062,7 +1172,7 @@ class GitHubService {
   }) async {
     try {
       final res = await client.get(
-        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/ref/heads/$branch'),
+        _repoUri(owner, repoName, '/git/ref/heads/${_seg(branch)}'),
         headers: _headers(token),
       ).timeout(_requestTimeout);
       if (res.statusCode == 200) {
@@ -1082,7 +1192,7 @@ class GitHubService {
   }) async {
     try {
       final res = await client.get(
-        Uri.parse('$_baseUrl/repos/$owner/$repoName/git/commits/$commitSha'),
+        _repoUri(owner, repoName, '/git/commits/${_seg(commitSha)}'),
         headers: _headers(token),
       ).timeout(_requestTimeout);
       if (res.statusCode == 200) {

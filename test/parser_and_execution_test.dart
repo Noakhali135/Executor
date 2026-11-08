@@ -222,4 +222,55 @@ void main() {
       expect(GitHubService.isFineGrainedToken('ghp_abc'), isFalse);
     });
   });
+
+  group('GitHub URL building', () {
+    // These names are legal on GitHub. Interpolating them raw into a URL
+    // truncated the path at the space and produced a misleading 404 on push.
+    const tricky = [
+      'Islamic Routine',
+      'my project',
+      'a.b_c-d',
+      'Ünïcode Repo',
+      'ends with space ',
+    ];
+
+    test('encodes repository names so the path survives parsing', () {
+      for (final name in tricky) {
+        final uri = GitHubService.repoUriForTest('Noakhali135', name.trim());
+        expect(
+          uri.pathSegments.length,
+          greaterThanOrEqualTo(3),
+          reason: 'name "$name" must not break the path',
+        );
+        expect(uri.pathSegments[1], 'Noakhali135');
+        expect(
+          uri.pathSegments[2],
+          name.trim(),
+          reason: 'decoded segment should round-trip "$name"',
+        );
+        expect(
+          uri.toString(),
+          isNot(contains(' ')),
+          reason: 'a raw space in "$name" would truncate the URL',
+        );
+      }
+    });
+
+    test('produces the expected API path for a spaced name', () {
+      final uri = GitHubService.repoUriForTest('Noakhali135', 'Islamic Routine');
+      expect(
+        uri.toString(),
+        'https://api.github.com/repos/Noakhali135/Islamic%20Routine',
+      );
+    });
+
+    test('appends suffixes without escaping the separators', () {
+      final uri = GitHubService.repoUriForTest(
+        'Noakhali135',
+        'Islamic Routine',
+        '/git/blobs',
+      );
+      expect(uri.toString(), endsWith('/Islamic%20Routine/git/blobs'));
+    });
+  });
 }
