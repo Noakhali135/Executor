@@ -36,6 +36,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
   String? _selectedRepo;
   String _selectedRepoDefaultBranch = 'main';
   List<Map<String, dynamic>> _userRepos = [];
+  String? _reposError;
   bool _isLoadingRepos = false;
   bool _pushSelectedOnly = false;
 
@@ -73,54 +74,64 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
   Future<void> _fetchRepos(String token, {String? preferredRepo}) async {
     setState(() {
       _isLoadingRepos = true;
+      _reposError = null;
     });
 
     final result = await GitHubService.getUserRepos(token);
     final repos = result.repos;
 
-    if (result.error != null && mounted && repos.isEmpty) {
-      widget.onLog('[AUTH] ${result.error!}', LogLevel.error);
-      setState(() => _isLoadingRepos = false);
+    if (!mounted) return;
+
+    if (repos.isEmpty) {
+      // Keep whatever the user already had: a failed or rate-limited list must
+      // never be mistaken for "you have to choose again".
+      final kept = (preferredRepo ?? _selectedRepo)?.trim();
+      setState(() {
+        _isLoadingRepos = false;
+        _reposError = result.error ??
+            'No repositories were returned for this account.';
+        if (kept != null && kept.isNotEmpty) _selectedRepo = kept;
+      });
+      if (result.error != null) {
+        widget.onLog('[REPOS] ${result.error!}', LogLevel.warning);
+      }
       return;
     }
 
-    if (mounted) {
-      final target = (preferredRepo ?? _selectedRepo)?.trim();
-      // Match case-insensitively and trim: GitHub repo names are case
-      // preserving, so a stored "Islamic Routine" and an API "islamic-routine"
-      // (or a stray space from a manual entry) used to fail this lookup and
-      // leave the selection empty — which then surfaced as "please select a
-      // repository first" even though the list had just loaded fine.
-      Map<String, dynamic>? match;
-      if (target != null && target.isNotEmpty) {
-        final lower = target.toLowerCase();
-        for (final repo in repos) {
-          final name = (repo['name'] as String?)?.trim().toLowerCase();
-          if (name == lower) {
-            match = repo;
-            break;
-          }
+    final target = (preferredRepo ?? _selectedRepo)?.trim();
+    Map<String, dynamic>? match;
+    if (target != null && target.isNotEmpty) {
+      final lower = target.toLowerCase();
+      for (final repo in repos) {
+        final name = (repo['name'] as String?)?.trim().toLowerCase();
+        if (name == lower) {
+          match = repo;
+          break;
         }
       }
+    }
 
-      final defaultBranch = (match?['default_branch'] as String?) ?? 'main';
+    // Fallback chain: saved match -> first repo -> previous selection.
+    final resolved = match?['name'] as String? ??
+        (repos.isNotEmpty ? repos.first['name'] as String? : null) ??
+        target;
 
-      setState(() {
-        _userRepos = repos;
-        _selectedRepo = match?['name'] as String?;
-        _selectedRepoDefaultBranch = defaultBranch;
-        if (_selectedRepo != null) _branchController.text = defaultBranch;
-        _isLoadingRepos = false;
-      });
+    final defaultBranch = (match?['default_branch'] as String?) ?? 'main';
 
-      // Make a silently-dropped selection visible instead of failing later.
-      if (target != null && target.isNotEmpty && match == null) {
-        widget.onLog(
-          'Previously selected repository "$target" is not in your repository '
-          'list any more (renamed, deleted, or not visible to this token).',
-          LogLevel.warning,
-        );
-      }
+    setState(() {
+      _userRepos = repos;
+      _selectedRepo = resolved;
+      _selectedRepoDefaultBranch = defaultBranch;
+      if (resolved != null) _branchController.text = defaultBranch;
+      _isLoadingRepos = false;
+    });
+
+    if (match == null && target != null && target.isNotEmpty) {
+      widget.onLog(
+        'Saved repository "$target" is not in this account any more; using '
+        '"$resolved" instead. Pick another from the dropdown if that is wrong.',
+        LogLevel.warning,
+      );
     }
   }
 
@@ -182,16 +193,51 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
   Future<void> _executePush() async {
     if (_savedToken == null || _username == null) return;
 
-    final targetRepo = _isCreateNew ? _newRepoController.text.trim() : _selectedRepo;
+    // Resolve the repository without ever asking the user to choose again.
+    // Order: the explicit new name -> current selection -> saved repo -> the
+    // only repo in the list. "Please select a repository" therefore only
+    // appears when there is genuinely nothing to pick.
+    String? targetRepo = _isCreateNew ? _newRepoController.text.trim() : _selectedRepo;
+
     if (targetRepo == null || targetRepo.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please select or create a repository first'),
-          backgroundColor: Color(0xFFDC2626),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-      return;
+      final saved = await GitHubService.getSavedRepo();
+      if (saved != null && saved.trim().isNotEmpty) {
+        targetRepo = saved.trim();
+      } else if (_userRepos.length == 1) {
+        targetRepo = _userRepos.first['name'] as String?;
+      }
+    }
+
+    if (targetRepo == null || targetRepo.isEmpty) {
+      // Last resort: load the list once, synchronously, before giving up.
+      final refreshed = await GitHubService.getUserRepos(_savedToken!);
+      final first = refreshed.repos.isNotEmpty
+          ? refreshed.repos.first['name'] as String?
+          : null;
+      if (first != null && first.isNotEmpty) {
+        targetRepo = first;
+        if (mounted) setState(() => _selectedRepo = first);
+        widget.onLog('Using "$first" as the target repository.', LogLevel.info);
+      } else {
+        if (mounted) {
+          setState(() => _isPushing = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                refreshed.error ??
+                    'No repositories are available for this account yet.',
+              ),
+              backgroundColor: const Color(0xFFDC2626),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    if (_selectedRepo == null || _selectedRepo!.isEmpty) {
+      _selectedRepo = targetRepo;
     }
 
     // Pre-flight the workspace: pushing to a folder Android will not let us
@@ -204,8 +250,8 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       }
       if (probe.looksLikePermissionProblem) {
         widget.onLog(
-          '[HOW TO FIX] Tap the banner in the directory picker to grant "All files access", '
-          'then re-select the folder — or copy the project into the DevRunner workspace.',
+          '[HOW TO FIX] Open the workspace picker and choose "Pick a folder", then '
+          'grant this folder to DevRunner. The grant is permanent.',
           LogLevel.warning,
         );
       }
@@ -215,7 +261,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
           SnackBar(
             content: Text(
               probe.looksLikePermissionProblem
-                  ? 'This folder is not readable. Grant file access first.'
+                  ? 'This folder is not granted to DevRunner. Pick it again.'
                   : 'This folder contains no files to push.',
             ),
             backgroundColor: const Color(0xFFDC2626),

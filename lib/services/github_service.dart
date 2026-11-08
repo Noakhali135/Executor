@@ -244,7 +244,7 @@ class GitHubService {
     final hasher = sha1.startChunkedConversion(sink);
     hasher.add(utf8.encode('blob $length\x00'));
     // openRead() streams for direct files and yields a single chunk when the
-    // bytes come from MediaStore.
+    // bytes come from a granted SAF tree.
     await for (final chunk in file.openRead()) {
       hasher.add(chunk);
     }
@@ -1239,38 +1239,16 @@ class GitHubService {
       );
     }
 
-    if (scan.usedMediaStore && scan.files.isNotEmpty) {
-      onLog(
-        '[ACCESS] Plain file access is blocked here; read ${scan.files.length} '
-        'file(s) through Android MediaStore instead.',
-        LogLevel.warning,
-      );
-    }
-
     if (scan.files.isEmpty) {
-      if (scan.mediaStoreFailure != null) {
-        onLog('[MEDIASTORE] ${scan.mediaStoreFailure!}', LogLevel.warning);
-      }
       if (scan.looksLikePermissionProblem) {
-        // Folders visible, contents invisible: scoped storage, not an empty
-        // project. Say so instead of leaving the user guessing.
+        // Folders visible, contents invisible: the folder was never granted.
         onLog(
           '[NO ACCESS] ${scan.directoryCount} folder(s) are visible but their contents are not readable.',
           LogLevel.error,
         );
         onLog(
-          '[HOW TO FIX] Android scoped storage blocks reading /storage/emulated/0/Download '
-          'without "All files access". Do one of these:',
-          LogLevel.warning,
-        );
-        onLog(
-          '  1. Open the directory picker and tap the banner "Only the app workspace is writable" '
-          'to grant access, then re-select this folder.',
-          LogLevel.warning,
-        );
-        onLog(
-          '  2. Or copy the project into the DevRunner workspace '
-          '(Android/data/com.executor.executor/files/DevRunner) and work from there.',
+          '[HOW TO FIX] Open the workspace picker and choose "Pick a folder", then '
+          'grant this folder. The grant is permanent and needs no permission.',
           LogLevel.warning,
         );
       } else {

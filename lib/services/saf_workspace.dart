@@ -50,13 +50,20 @@ class SafWorkspace {
 
   static bool isSafPath(String path) => path.startsWith('$virtualRoot/');
 
-  /// Splits a virtual path into its tree id and relative remainder.
-  static ({String treeId, String relative}) split(String path) {
+  /// Splits a virtual path into its opaque tree segment and relative remainder.
+  ///
+  /// The segment is an encoded document id, **not** a human readable name and
+  /// not comparable to [SafTree.treeId]; compare [SafTree.virtualPath] instead.
+  static ({String segment, String relative}) split(String path) {
     final rest = path.substring(virtualRoot.length + 1);
     final slash = rest.indexOf('/');
-    if (slash < 0) return (treeId: rest, relative: '');
-    return (treeId: rest.substring(0, slash), relative: rest.substring(slash + 1));
+    if (slash < 0) return (segment: rest, relative: '');
+    return (segment: rest.substring(0, slash), relative: rest.substring(slash + 1));
   }
+
+  /// True when [path] belongs to [tree].
+  static bool belongsTo(String path, SafTree tree) =>
+      isSafPath(path) && split(path).segment == split(tree.virtualPath).segment;
 
   /// Opens the system folder picker. Returns null when the user cancels.
   static Future<SafTree?> pickDirectory() async {
@@ -75,6 +82,7 @@ class SafWorkspace {
     try {
       final list = await _channel.invokeListMethod<Map<Object?, Object?>>('listGrantedTrees');
       return (list ?? const [])
+          // listGrantedTrees includes virtualPath; SafTree.fromMap needs it.
           .map(SafTree.fromMap)
           .whereType<SafTree>()
           .toList();
@@ -209,7 +217,7 @@ class SafWorkspace {
     if (!isSafPath(path)) return path;
     final parts = split(path);
     for (final tree in trees) {
-      if (tree.treeId == parts.treeId) {
+      if (belongsTo(path, tree)) {
         return parts.relative.isEmpty
             ? tree.displayPath
             : '${tree.displayPath}/${parts.relative}';
@@ -217,4 +225,25 @@ class SafWorkspace {
     }
     return path;
   }
+}
+
+/// Human readable label for any workspace path.
+///
+/// SAF workspaces live at a virtual path; this turns them into something a
+/// person can read, e.g. `Download/rou_is-Full-Project`.
+Future<String> workspaceLabel(String path, {List<SafTree>? trees}) async {
+  if (path.isEmpty) return 'No folder selected';
+  if (!SafWorkspace.isSafPath(path)) return path;
+
+  final parts = SafWorkspace.split(path);
+  final granted = trees ?? await SafWorkspace.grantedTrees();
+
+  for (final tree in granted) {
+    if (!SafWorkspace.belongsTo(path, tree)) continue;
+    return parts.relative.isEmpty
+        ? tree.displayPath
+        : '${tree.displayPath}/${parts.relative}';
+  }
+  // No matching grant (revoked, or the platform could not decode it).
+  return 'Granted folder (unavailable)';
 }

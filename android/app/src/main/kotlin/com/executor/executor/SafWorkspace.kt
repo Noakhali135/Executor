@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Base64
 import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import io.flutter.plugin.common.MethodCall
@@ -86,12 +87,11 @@ class SafWorkspace(private val activity: Activity) {
             val treeId = DocumentsContract.getTreeDocumentId(uri)
             rememberTree(treeId, uri.toString())
 
-            val displayPath = friendlyPath(treeId)
             result?.success(
                 mapOf(
                     "treeId" to treeId,
-                    "virtualPath" to "$VIRTUAL_ROOT/$treeId",
-                    "displayPath" to displayPath
+                    "virtualPath" to "$VIRTUAL_ROOT/${encodeTreeId(treeId)}",
+                    "displayPath" to friendlyPath(treeId)
                 )
             )
         } catch (e: Exception) {
@@ -122,6 +122,7 @@ class SafWorkspace(private val activity: Activity) {
             val file = DocumentFile.fromTreeUri(context, uri) ?: return@mapNotNull null
             mapOf(
                 "treeId" to treeId,
+                "virtualPath" to "$VIRTUAL_ROOT/${encodeTreeId(treeId)}",
                 "uri" to uri.toString(),
                 "displayPath" to friendlyPath(treeId),
                 "name" to (file.name ?: treeId)
@@ -142,6 +143,29 @@ class SafWorkspace(private val activity: Activity) {
         prefs().edit().putStringSet(KEY_TREES, remaining).apply()
     }
 
+    /**
+     * Encodes a tree id into a single URL-safe path segment.
+     *
+     * Tree ids are documents ids and may contain `/`
+     * (`primary:Download/rou_is-Full-Project`), so using them verbatim inside a
+     * virtual path made every lookup after the first slash fail. Base64url with
+     * padding stripped keeps the virtual path a valid, unambiguous segment.
+     */
+    private fun encodeTreeId(treeId: String): String =
+        Base64.encodeToString(
+            treeId.toByteArray(Charsets.UTF_8),
+            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+        )
+
+    private fun decodeTreeId(segment: String): String? = try {
+        String(
+            Base64.decode(segment, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING),
+            Charsets.UTF_8
+        )
+    } catch (_: Exception) {
+        null
+    }
+
     /** Turns `primary:Download/project` into `Download/project`. */
     private fun friendlyPath(treeId: String): String {
         return if (treeId.startsWith("primary:")) treeId.removePrefix("primary:")
@@ -154,8 +178,9 @@ class SafWorkspace(private val activity: Activity) {
     fun resolve(virtualPath: String): DocumentFile? {
         if (!virtualPath.startsWith("$VIRTUAL_ROOT/")) return null
         val rest = virtualPath.removePrefix("$VIRTUAL_ROOT/")
-        val treeId = rest.substringBefore('/')
+        val segment = rest.substringBefore('/')
         val relative = rest.substringAfter('/', "")
+        val treeId = decodeTreeId(segment) ?: return null
 
         val uri = knownTrees().firstOrNull { it.first == treeId }?.second ?: return null
         var current = DocumentFile.fromTreeUri(context, uri) ?: return null
@@ -263,7 +288,9 @@ class SafWorkspace(private val activity: Activity) {
         val parentVirtual = if (parentPath.isEmpty()) VIRTUAL_ROOT else parentPath
         val parent = resolveOrCreateDirectory(parentVirtual) ?: return false
         val existing = parent.findFile(name)
-        val target = existing ?: parent.createFile("application/octet-stream", name) ?: return false
+        // "text/plain" keeps the original name; application/octet-stream makes
+        // some providers append a .bin extension.
+        val target = existing ?: parent.createFile("text/plain", name) ?: return false
 
         return try {
             context.contentResolver.openOutputStream(target.uri, "wt")?.use {
@@ -281,8 +308,9 @@ class SafWorkspace(private val activity: Activity) {
         if (!virtualPath.startsWith("$VIRTUAL_ROOT/")) return null
 
         val rest = virtualPath.removePrefix("$VIRTUAL_ROOT/")
-        val treeId = rest.substringBefore('/')
+        val segment = rest.substringBefore('/')
         val relative = rest.substringAfter('/', "")
+        val treeId = decodeTreeId(segment) ?: return null
         val uri = knownTrees().firstOrNull { it.first == treeId }?.second ?: return null
 
         var current = DocumentFile.fromTreeUri(context, uri) ?: return null

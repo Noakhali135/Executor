@@ -1,12 +1,9 @@
-import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import 'saf_workspace.dart';
-import 'storage_service.dart';
 
 /// Directories that are never worth pushing and are usually enormous.
 const Set<String> kIgnoredDirectoryNames = {
@@ -14,25 +11,22 @@ const Set<String> kIgnoredDirectoryNames = {
   '.vscode', '__pycache__', '.venv', 'venv', 'Pods', '.next', '.cache',
 };
 
-/// One file that can be read either directly or through Android's MediaStore.
+/// One file in a workspace, readable from `dart:io` or a granted SAF tree.
 ///
 /// Scoped storage can expose *folder names* through `dart:io` while denying
 /// access to the files inside them. For those, the platform channel is used to
 /// read the bytes, so a real project can still be pushed.
 class WorkspaceFile {
   final String path;
-  final int? mediaId;
   final int size;
 
-  const WorkspaceFile(this.path, {this.mediaId, this.size = -1});
+  const WorkspaceFile(this.path, {this.size = -1});
 
   String get name => p.basename(path);
 
-  bool get viaMediaStore => mediaId != null;
-
   Future<int> length() async {
     if (size >= 0) return size;
-    if (viaMediaStore || SafWorkspace.isSafPath(path)) {
+    if (SafWorkspace.isSafPath(path)) {
       return (await readAsBytes()).length;
     }
     return File(path).length();
@@ -42,26 +36,11 @@ class WorkspaceFile {
     if (SafWorkspace.isSafPath(path)) {
       return await SafWorkspace.readFile(path) ?? Uint8List(0);
     }
-    if (viaMediaStore) {
-      try {
-        final bytes = await WorkspaceProbe.android.invokeMethod<Uint8List>(
-          'readMediaStoreFile',
-          {'id': mediaId},
-        );
-        return bytes ?? Uint8List(0);
-      } catch (_) {
-        return Uint8List(0);
-      }
-    }
     return File(path).readAsBytes();
   }
 
   Stream<List<int>> openRead() async* {
     if (SafWorkspace.isSafPath(path)) {
-      yield await readAsBytes();
-      return;
-    }
-    if (viaMediaStore) {
       yield await readAsBytes();
       return;
     }
@@ -77,12 +56,6 @@ class WorkspaceScan {
   final int skippedIgnored;
   final List<String> errors;
 
-  /// True when the file list came from MediaStore rather than `dart:io`.
-  final bool usedMediaStore;
-
-  /// Reason the MediaStore fallback was unavailable/unsuccessful, if any.
-  final String? mediaStoreFailure;
-
   /// True when the files came from a granted SAF tree.
   final bool viaSaf;
 
@@ -92,8 +65,6 @@ class WorkspaceScan {
     required this.unreadableEntries,
     required this.skippedIgnored,
     required this.errors,
-    this.usedMediaStore = false,
-    this.mediaStoreFailure,
     this.viaSaf = false,
   });
 
@@ -113,20 +84,6 @@ class WorkspaceScan {
 /// Resolves paths, walks workspaces, and works around Android scoped storage.
 class WorkspaceProbe {
   WorkspaceProbe._();
-
-  static const MethodChannel android = MethodChannel('devrunner/native');
-
-  static int? _sdkInt;
-
-  static Future<int> androidSdkInt() async {
-    if (_sdkInt != null) return _sdkInt!;
-    try {
-      _sdkInt = await android.invokeMethod<int>('sdkInt') ?? 0;
-    } catch (_) {
-      _sdkInt = 0;
-    }
-    return _sdkInt!;
-  }
 
   static String canonical(String path) {
     try {
@@ -261,102 +218,15 @@ class WorkspaceProbe {
       skippedIgnored: skippedIgnored,
       errors: const [],
       viaSaf: true,
-      mediaStoreFailure: files.isEmpty ? 'The granted folder contains no files.' : null,
     );
   }
 
-  /// Lists files under [root] through Android's MediaStore.
-  static Future<WorkspaceScan> scanViaMediaStore(
-    String root, {
-    int maxFiles = 5000,
-  }) async {
-    final sdk = await androidSdkInt();
-    if (sdk < 21) {
-      return WorkspaceScan(
-        files: const [],
-        directoryCount: 0,
-        unreadableEntries: 0,
-        skippedIgnored: 0,
-        errors: const [],
-        mediaStoreFailure: 'MediaStore is unavailable on this Android version.',
-      );
-    }
-
-    try {
-      final rows = await android.invokeListMethod<Map<Object?, Object?>>(
-        'listMediaStoreFiles',
-        {'path': root, 'maxFiles': maxFiles},
-      );
-
-      if (rows == null) {
-        return const WorkspaceScan(
-          files: [],
-          directoryCount: 0,
-          unreadableEntries: 0,
-          skippedIgnored: 0,
-          errors: [],
-          mediaStoreFailure: 'MediaStore is not available in this build.',
-        );
-      }
-
-      final files = <WorkspaceFile>[];
-      var skippedIgnored = 0;
-
-      for (final row in rows) {
-        final path = row['path'] as String?;
-        if (path == null || path.isEmpty) continue;
-        if (isIgnored(path)) {
-          skippedIgnored++;
-          continue;
-        }
-        files.add(WorkspaceFile(
-          path,
-          mediaId: (row['id'] as num?)?.toInt(),
-          size: (row['size'] as num?)?.toInt() ?? -1,
-        ));
-      }
-
-      return WorkspaceScan(
-        files: files,
-        directoryCount: 1,
-        unreadableEntries: 0,
-        skippedIgnored: skippedIgnored,
-        errors: const [],
-        usedMediaStore: true,
-        mediaStoreFailure: files.isEmpty
-            ? 'MediaStore sees no files here. Android only indexes media and '
-                'Downloads it owns; source files are usually not indexed.'
-            : null,
-      );
-    } on PlatformException catch (e) {
-      return WorkspaceScan(
-        files: const [],
-        directoryCount: 0,
-        unreadableEntries: 0,
-        skippedIgnored: 0,
-        errors: const [],
-        mediaStoreFailure: e.message ?? e.code,
-      );
-    } catch (e) {
-      return WorkspaceScan(
-        files: const [],
-        directoryCount: 0,
-        unreadableEntries: 0,
-        skippedIgnored: 0,
-        errors: const [],
-        mediaStoreFailure: e.toString(),
-      );
-    }
-  }
-
-  /// The scan a push should use: plain filesystem first, then MediaStore.
+  /// The scan a push should use.
+  ///
+  /// SAF trees are read directly; plain paths use `dart:io`.
   static Future<WorkspaceScan> scanForPush(String root, {int maxFiles = 5000}) async {
     if (SafWorkspace.isSafPath(root)) return scanSaf(root, maxFiles: maxFiles);
-
-    final direct = await scan(root, maxFiles: maxFiles);
-    if (direct.files.isNotEmpty) return direct;
-    if (!direct.looksLikePermissionProblem) return direct;
-    return scanViaMediaStore(root, maxFiles: maxFiles);
+    return scan(root, maxFiles: maxFiles);
   }
 
   static String describeError(Object error) {
@@ -371,7 +241,9 @@ class WorkspaceProbe {
 
   /// Explains what is wrong with [path] and what to do about it.
   ///
-  /// Returns an empty list when the workspace is usable.
+  /// Returns an empty list when the workspace is usable. The advice is now
+  /// SAF-specific: there is no permission to grant, so the only remedy is to
+  /// re-grant the folder (or use the app workspace).
   static Future<List<String>> diagnose(String path) async {
     final problems = <String>[];
 
@@ -389,49 +261,27 @@ class WorkspaceProbe {
     }
 
     final direct = await scan(path, maxFiles: 200);
-    if (direct.files.isNotEmpty) return problems;
+    if (direct.files.isNotEmpty) {
+      problems.add(
+        'This location is outside a granted folder. If files are missing, pick it '
+        'again with "Pick a folder" so Android grants access.',
+      );
+      return problems;
+    }
 
     if (!direct.looksLikePermissionProblem) {
       problems.add('No files found under $path.');
       return problems;
     }
 
-    // Folders visible but files not: see whether MediaStore can rescue it.
-    final media = await scanViaMediaStore(path, maxFiles: 200);
-    if (media.files.isNotEmpty) {
-      problems.add(
-        'Plain file access is blocked here, but ${media.files.length} file(s) are '
-        'reachable through MediaStore and will be pushed. Folders and non-media '
-        'files (e.g. .dart, .yaml) may still be missing.',
-      );
-      return problems;
-    }
-
-    final hasAccess = await StorageService.hasBroadStorageAccess();
     problems.add(
       'Android is showing ${direct.directoryCount} folder(s) here but hiding the '
-      'files inside them, so nothing can be pushed from this location.',
+      'files inside them. This location was not granted to DevRunner.',
     );
-
-    if (hasAccess) {
-      problems.add(
-        '"All files access" is granted, yet Android 11+ still hides non-media '
-        'files in Download from third-party apps. MediaStore found nothing either '
-        '(${media.mediaStoreFailure ?? 'no results'}).',
-      );
-    } else {
-      problems.add(
-        'Grant "All files access": open the directory picker, tap the banner, '
-        'approve it, then re-select this folder.',
-      );
-    }
-
     problems.add(
-      'Guaranteed to work: move or copy the project into the DevRunner workspace '
-      '(Android/data/com.executor.executor/files/DevRunner) and select it there — '
-      'that location needs no permission at all.',
+      'Open the workspace picker and choose "Pick a folder", then select this '
+      'folder. The grant is permanent and needs no storage permission.',
     );
-
     return problems;
   }
 }

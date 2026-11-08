@@ -352,10 +352,20 @@ void main() {
       expect(SafWorkspace.isSafPath('/storage/emulated/0/Download'), isFalse);
     });
 
-    test('splits tree id from the relative remainder', () {
+    test('splits the opaque tree segment from the relative remainder', () {
       final parts = SafWorkspace.split('$tree/lib/src');
-      expect(parts.treeId, 'primary:Download/app');
+      expect(parts.segment, 'primary:Download/app');
       expect(parts.relative, 'lib/src');
+    });
+
+    test('a granted tree is matched by its virtual path, not a raw id', () {
+      const granted = SafTree(
+        treeId: 'primary:Download/app',
+        virtualPath: tree,
+        displayPath: 'Download/app',
+      );
+      expect(SafWorkspace.belongsTo('$tree/lib/a.dart', granted), isTrue);
+      expect(SafWorkspace.belongsTo('/tmp/other/a.dart', granted), isFalse);
     });
 
     test('PathGuard contains SAF paths and still blocks traversal', () {

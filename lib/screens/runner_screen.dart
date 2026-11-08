@@ -6,7 +6,7 @@ import '../services/file_execution_service.dart';
 import '../services/saf_workspace.dart';
 import '../services/storage_service.dart';
 import '../services/workspace_probe.dart';
-import '../widgets/directory_picker_dialog.dart';
+import '../widgets/workspace_picker_sheet.dart';
 import '../widgets/github_sync_dialog.dart';
 
 /// Description of content pushed into the command buffer from the Explorer.
@@ -105,26 +105,28 @@ class _RunnerScreenState extends State<RunnerScreen> {
     final problems = await WorkspaceProbe.diagnose(dir);
     if (!mounted || problems.isEmpty) return;
 
-    _addLog('Workspace check: $dir', LogLevel.info);
+    _addLog('Workspace check: ${await workspaceLabel(dir)}', LogLevel.info);
     for (final problem in problems) {
       _addLog('[WORKSPACE] $problem', LogLevel.warning);
     }
   }
 
+  /// Opens the SAF-only workspace picker.
   Future<void> _handleBrowse() async {
-    final selected = await showDialog<String>(
+    final selected = await showModalBottomSheet<String>(
       context: context,
-      builder: (ctx) => DirectoryPickerDialog(
-        initialPath: widget.workingDir,
-      ),
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => WorkspacePickerSheet(currentPath: widget.workingDir),
     );
 
-    if (selected != null && selected.isNotEmpty) {
-      await StorageService.saveDirectory(selected);
-      widget.onDirectoryChanged(selected);
-      _addLog('Changed working directory to: $selected', LogLevel.info);
-      await _diagnoseWorkingDir(selected);
-    }
+    if (selected == null || selected.isEmpty) return;
+
+    await StorageService.saveDirectory(selected);
+    widget.onDirectoryChanged(selected);
+
+    _addLog('Workspace set to: ${await workspaceLabel(selected)}', LogLevel.info);
+    await _diagnoseWorkingDir(selected);
   }
 
   void _handleOpenGitHubSync() {
@@ -550,19 +552,16 @@ class _RunnerScreenState extends State<RunnerScreen> {
   }
 
   Widget _buildWorkingDirectoryCard() {
-    // SAF workspaces live at a virtual path; show something a human reads.
-    String friendlyPath(String path) {
-      if (!SafWorkspace.isSafPath(path)) return path;
-      final parts = SafWorkspace.split(path);
-      final relative = parts.relative;
-      return relative.isEmpty
-          ? 'Granted folder (${parts.treeId.split(':').last})'
-          : 'Granted folder: ${parts.treeId.split(':').last}/$relative';
-    }
+    var pathDisplay = widget.workingDir.isEmpty
+        ? 'No folder selected. Tap Choose folder...'
+        : widget.workingDir;
 
-    final pathDisplay = widget.workingDir.isEmpty
-        ? 'No directory selected. Tap Browse...'
-        : friendlyPath(widget.workingDir);
+    if (SafWorkspace.isSafPath(widget.workingDir)) {
+      final parts = SafWorkspace.split(widget.workingDir);
+      pathDisplay = parts.relative.isEmpty
+          ? 'Granted folder'
+          : 'Granted folder: ${parts.relative}';
+    }
 
     return Container(
       decoration: BoxDecoration(
@@ -660,7 +659,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
                   onPressed: _handleBrowse,
                   icon: const Icon(Icons.folder_open, size: 15, color: Colors.white),
                   label: const Text(
-                    'Browse',
+                    'Choose folder',
                     style: TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.w600,
