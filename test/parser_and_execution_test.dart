@@ -4,6 +4,7 @@ import 'package:executor/models/command_action.dart';
 import 'package:executor/services/command_parser_service.dart';
 import 'package:executor/services/export_service.dart';
 import 'package:executor/services/file_execution_service.dart';
+import 'package:executor/services/github_service.dart';
 import 'package:executor/services/path_guard.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -186,6 +187,39 @@ void main() {
       );
       expect(plan.deleteCount, 1);
       expect(plan.createCount, 1);
+    });
+  });
+
+  group('GitHubService token handling', () {
+    test('strips a pasted "Authorization: Bearer" header', () {
+      expect(
+        GitHubService.sanitizeToken('  Authorization: Bearer ghp_abc123  '),
+        'ghp_abc123',
+      );
+    });
+
+    test('strips a bare Bearer prefix and surrounding quotes', () {
+      expect(GitHubService.sanitizeToken('"Bearer ghp_abc123"'), 'ghp_abc123');
+      expect(GitHubService.sanitizeToken("'ghp_abc123'"), 'ghp_abc123');
+    });
+
+    test('absorbs a token wrapped across lines by a paste', () {
+      expect(
+        GitHubService.sanitizeToken('github_pat_11ABC\nDEF22xyz'),
+        'github_pat_11ABCDEF22xyz',
+      );
+    });
+
+    test('removes zero-width characters from web copies', () {
+      expect(GitHubService.sanitizeToken('ghp_ab\u200bc'), 'ghp_abc');
+    });
+
+    test('recognises classic and fine-grained token formats', () {
+      expect(GitHubService.looksLikeToken('ghp_abc'), isTrue);
+      expect(GitHubService.looksLikeToken('github_pat_abc'), isTrue);
+      expect(GitHubService.looksLikeToken('my-password'), isFalse);
+      expect(GitHubService.isFineGrainedToken('github_pat_abc'), isTrue);
+      expect(GitHubService.isFineGrainedToken('ghp_abc'), isFalse);
     });
   });
 }

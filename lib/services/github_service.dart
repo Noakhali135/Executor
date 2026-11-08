@@ -27,6 +27,42 @@ class _PushConflict implements Exception {
   _PushConflict(this.message);
 }
 
+/// An authentication/authorisation problem that no amount of retrying will
+/// fix. Carries an actionable remedy so the UI can tell the user exactly what
+/// to change instead of dumping a wall of identical HTTP 401 lines.
+class GitHubAuthException implements Exception {
+  final String message;
+  final String remedy;
+
+  GitHubAuthException(this.message, this.remedy);
+
+  @override
+  String toString() => '$message $remedy';
+}
+
+/// Result of listing the authenticated user's repositories.
+class RepoListResult {
+  final List<Map<String, dynamic>> repos;
+  final String? error;
+
+  const RepoListResult({required this.repos, this.error});
+}
+
+/// Result of a `GET /repos/{owner}/{repo}` probe performed before uploading.
+class RepoAccess {
+  final bool canRead;
+  final bool canPush;
+  final String? defaultBranch;
+  final GitHubAuthException? failure;
+
+  const RepoAccess({
+    required this.canRead,
+    required this.canPush,
+    this.defaultBranch,
+    this.failure,
+  });
+}
+
 /// A file whose bytes will be uploaded.
 class _LocalFileToUpload {
   final File file;
@@ -87,7 +123,7 @@ class GitHubService {
   /// Stores the credential in the platform keystore and only the (non-secret)
   /// username in SharedPreferences.
   static Future<void> saveToken(String token, String username) async {
-    await SecureStore.writeToken(token);
+    await SecureStore.writeToken(sanitizeToken(token));
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyUsername, username.trim());
   }
@@ -99,9 +135,54 @@ class GitHubService {
     await prefs.remove(_keySelectedRepo);
   }
 
-  static Map<String, String> _headers(String token) {
+  /// Normalises a token pasted by the user.
+  ///
+  /// Common paste mistakes that used to surface as a bare HTTP 401:
+  ///  * a full header, e.g. `Authorization: Bearer ghp_xxx`
+  ///  * a stray `Bearer ` / `token ` prefix
+  ///  * surrounding quotes or a trailing newline from a web page copy
+  ///  * the token wrapped across two lines (absorbed whitespace)
+  static String sanitizeToken(String raw) {
+    var value = raw.replaceAll('\u200b', '').trim();
+
+    while (value.length >= 2 &&
+        ((value.startsWith('"') && value.endsWith('"')) ||
+            (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.substring(1, value.length - 1).trim();
+    }
+
+    if (value.toLowerCase().startsWith('authorization:')) {
+      value = value.substring('authorization:'.length).trim();
+    }
+
+    final lower = value.toLowerCase();
+    if (lower.startsWith('bearer ')) {
+      value = value.substring('bearer '.length).trim();
+    } else if (lower.startsWith('token ')) {
+      value = value.substring('token '.length).trim();
+    }
+
+    // GitHub tokens never contain internal whitespace; wrapped pastes do.
+    return value.replaceAll(RegExp(r'\s+'), '');
+  }
+
+  /// True when the string looks like any known GitHub token format.
+  static bool looksLikeToken(String token) {
+    return token.startsWith('ghp_') ||
+        token.startsWith('gho_') ||
+        token.startsWith('ghu_') ||
+        token.startsWith('ghs_') ||
+        token.startsWith('ghr_') ||
+        token.startsWith('github_pat_');
+  }
+
+  static bool isFineGrainedToken(String token) =>
+      token.startsWith('github_pat_');
+
+  static Map<String, String> _headers(String rawToken) {
+    final token = sanitizeToken(rawToken);
     return {
-      'Authorization': 'Bearer ${token.trim()}',
+      'Authorization': 'Bearer $token',
       'Accept': 'application/vnd.github+json',
       'User-Agent': 'DevRunner-Mobile-App',
       'X-GitHub-Api-Version': '2022-11-28',
@@ -136,9 +217,16 @@ class GitHubService {
   // ------------------------------------------------------------ endpoints ----
 
   static Future<TokenVerifyResult> verifyToken(String rawToken) async {
-    final token = rawToken.trim();
+    final token = sanitizeToken(rawToken);
     if (token.isEmpty) {
       return const TokenVerifyResult(success: false, errorMessage: 'Token cannot be empty');
+    }
+    if (!looksLikeToken(token)) {
+      return const TokenVerifyResult(
+        success: false,
+        errorMessage: 'That does not look like a GitHub token. It should start with '
+            'ghp_ (classic) or github_pat_ (fine-grained).',
+      );
     }
 
     final client = http.Client();
@@ -176,17 +264,205 @@ class GitHubService {
   static String _extractMessage(http.Response res) {
     try {
       final body = jsonDecode(res.body);
-      if (body is Map && body['message'] is String) return body['message'] as String;
+      if (body is Map && body['message'] is String) {
+        final msg = body['message'] as String;
+        // GitHub returns 403 with this message when the hourly quota is gone.
+        if (msg.toLowerCase().contains('rate limit')) {
+          return 'API rate limit exceeded';
+        }
+        return msg;
+      }
     } catch (_) {}
-    if (res.statusCode == 401) return 'Invalid or expired token';
-    if (res.statusCode == 403) return 'Forbidden (check token scopes / rate limit)';
-    if (res.statusCode == 404) return 'Not found';
+
+    switch (res.statusCode) {
+      case 401:
+        return 'Unauthorized — the token is invalid or expired';
+      case 403:
+        return 'Forbidden — the token lacks the required permission';
+      case 404:
+        return 'Not found — the repository does not exist or the token cannot see it';
+      case 409:
+        return 'Conflict — the branch changed remotely';
+      case 422:
+        return 'Unprocessable — the request was rejected by GitHub';
+      case 429:
+        return 'Too many requests — GitHub is rate limiting this device';
+    }
     return 'GitHub returned HTTP ${res.statusCode}';
+  }
+
+  /// Convenience: is this response an authentication failure?
+  static bool _isUnauthorized(http.Response res) => res.statusCode == 401;
+
+  /// Is this response a rate-limit rejection (429, or 403 + rate-limit text)?
+  static bool _isRateLimited(http.Response res) {
+    if (res.statusCode == 429) return true;
+    if (res.statusCode == 403) {
+      if (res.headers['x-ratelimit-remaining'] == '0') return true;
+      final text = res.body.toLowerCase();
+      return text.contains('rate limit') || text.contains('secondary rate');
+    }
+    return false;
+  }
+
+  /// Builds the message + remedy shown when the token itself is the problem.
+  static GitHubAuthException _authFailureFor(
+    http.Response res, {
+    required String token,
+    required String action,
+  }) {
+    final isFineGrained = isFineGrainedToken(sanitizeToken(token));
+    final scopeHeader = res.headers['x-oauth-scopes'] ?? '';
+    final accepted = res.headers['x-accepted-oauth-scopes'] ?? '';
+
+    final scopeNote = scopeHeader.trim().isEmpty
+        ? 'The token exposes no OAuth scopes.'
+        : 'Token scopes: "$scopeHeader".'
+        + (accepted.trim().isEmpty ? '' : ' This call needs: "$accepted".');
+
+    final remedy = isFineGrained
+        ? 'This is a fine-grained token (github_pat_…). Open it in GitHub → '
+            'Settings → Developer settings → Fine-grained tokens and make sure '
+            '"Repository access" includes this repo with Contents = Read and write '
+            'and Metadata = Read-only.'
+        : 'Open GitHub → Settings → Developer settings → Tokens (classic) and check '
+            'the token has the "repo" scope (and has not expired), then reconnect.';
+
+    return GitHubAuthException(
+      'Cannot $action: the token was rejected (401). $scopeNote',
+      remedy,
+    );
+  }
+
+  /// Verifies the token can actually read *and* write the target repository
+  /// before a single blob is uploaded.
+  ///
+  /// This is the fix for pushes that failed part-way with a flood of 401s: a
+  /// token can list repositories (repo picker works) yet still be unable to
+  /// push to a specific one, and previously that was only discovered after
+  /// every blob request had already failed.
+  static Future<RepoAccess> checkRepoAccess({
+    required String token,
+    required String owner,
+    required String repoName,
+  }) async {
+    final client = http.Client();
+    try {
+      final res = await client.get(
+        Uri.parse('$_baseUrl/repos/$owner/$repoName'),
+        headers: _headers(token),
+      ).timeout(_requestTimeout);
+
+      if (_isRateLimited(res)) {
+        final reset = res.headers['x-ratelimit-reset'];
+        return RepoAccess(
+          canRead: false,
+          canPush: false,
+          failure: GitHubAuthException(
+            'GitHub is rate limiting this device.',
+            reset == null
+                ? 'Wait a few minutes and try again.'
+                : 'Try again after the quota resets (epoch $reset).',
+          ),
+        );
+      }
+
+      if (_isUnauthorized(res)) {
+        return RepoAccess(
+          canRead: false,
+          canPush: false,
+          failure: _authFailureFor(res, token: token, action: 'open $owner/$repoName'),
+        );
+      }
+
+      if (res.statusCode == 404) {
+        return RepoAccess(
+          canRead: false,
+          canPush: false,
+          failure: GitHubAuthException(
+            'Repository $owner/$repoName was not found (404).',
+            'It may be private under a different account, renamed, or the token '
+                'has no access to it. Re-check the repository list and reconnect.',
+          ),
+        );
+      }
+
+      if (res.statusCode != 200) {
+        return RepoAccess(
+          canRead: false,
+          canPush: false,
+          failure: GitHubAuthException(
+            'Could not open $owner/$repoName (${res.statusCode}): ${_extractMessage(res)}',
+            'Try again, or create a new repository from this dialog.',
+          ),
+        );
+      }
+
+      final data = jsonDecode(res.body);
+      final permissions = data['permissions'];
+
+      // `permissions.push` is the authoritative "can I write here" flag. Older
+      // responses without the block are treated as writable so we never block
+      // a push that would have worked.
+      final canPush = permissions is Map ? (permissions['push'] == true) : true;
+
+      if (!canPush) {
+        return RepoAccess(
+          canRead: true,
+          canPush: false,
+          defaultBranch: data['default_branch'] as String?,
+          failure: GitHubAuthException(
+            'The token can read $owner/$repoName but not write to it.',
+            'You need "Contents: Read and write" (or the classic "repo" scope) '
+                'on this repository. Grants made to a different account, or a '
+                'read-only collaborator role, will produce exactly this error.',
+          ),
+        );
+      }
+
+      return RepoAccess(
+        canRead: true,
+        canPush: true,
+        defaultBranch: data['default_branch'] as String?,
+      );
+    } on TimeoutException {
+      return RepoAccess(
+        canRead: false,
+        canPush: false,
+        failure: GitHubAuthException(
+          'Checking repository access timed out.',
+          'Check the device internet connection and try again.',
+        ),
+      );
+    } on SocketException {
+      return RepoAccess(
+        canRead: false,
+        canPush: false,
+        failure: GitHubAuthException(
+          'Network error while checking repository access.',
+          'Check the device internet connection and try again.',
+        ),
+      );
+    } catch (e) {
+      return RepoAccess(
+        canRead: false,
+        canPush: false,
+        failure: GitHubAuthException(
+          'Could not verify repository access: $e',
+          'Try again.',
+        ),
+      );
+    } finally {
+      client.close();
+    }
   }
 
   /// Returns repositories plus their default branch so a push never has to
   /// assume `main`.
-  static Future<List<Map<String, dynamic>>> getUserRepos(String token) async {
+  ///
+  /// The error field exists because returning an empty list for every failure
+  /// made a rejected token look like "this account has no repositories".
+  static Future<RepoListResult> getUserRepos(String token) async {
     final client = http.Client();
     try {
       final res = await client.get(
@@ -195,21 +471,40 @@ class GitHubService {
       ).timeout(_requestTimeout);
       if (res.statusCode == 200) {
         final list = jsonDecode(res.body) as List;
-        return list.map((e) => {
-              'name': e['name'] as String,
-              'full_name': e['full_name'] as String,
-              'private': e['private'] as bool,
-              'default_branch': e['default_branch'] as String? ?? 'main',
-            }).toList();
+        return RepoListResult(
+          repos: list.map((e) => {
+                'name': e['name'] as String,
+                'full_name': e['full_name'] as String,
+                'private': e['private'] as bool,
+                'default_branch': e['default_branch'] as String? ?? 'main',
+              }).toList(),
+        );
       }
+      if (_isRateLimited(res)) {
+        return const RepoListResult(
+          repos: [],
+          error: 'GitHub is rate limiting this device. Wait a few minutes and retry.',
+        );
+      }
+      if (_isUnauthorized(res)) {
+        return const RepoListResult(
+          repos: [],
+          error: 'The token was rejected (401). Reconnect with a valid token.',
+        );
+      }
+      return RepoListResult(
+        repos: const [],
+        error: 'Could not load repositories: ${_extractMessage(res)}',
+      );
     } on TimeoutException {
-      return [];
-    } catch (_) {
-      return [];
+      return const RepoListResult(repos: [], error: 'Loading repositories timed out.');
+    } on SocketException {
+      return const RepoListResult(repos: [], error: 'Network error while loading repositories.');
+    } catch (e) {
+      return RepoListResult(repos: const [], error: 'Could not load repositories: $e');
     } finally {
       client.close();
     }
-    return [];
   }
 
   /// Looks up the repository's default branch, falling back to `main`.
@@ -285,7 +580,21 @@ class GitHubService {
     await Future.wait(futures);
   }
 
-  /// Pushes the workspace, retrying once if the branch moved underneath us.
+  /// Asks the user for a fresh token when the stored one is rejected.
+  ///
+  /// Returning `null` means "not now"; returning a string means the caller
+  /// should retry with it.
+  typedef ReauthPrompt = Future<String?> Function(GitHubAuthException error);
+
+  /// Pushes the workspace.
+  ///
+  /// Order of operations is deliberately "cheap check first":
+  ///  1. verify the token can read *and* write the target repository — this is
+  ///     what turns a flood of per-blob 401s into one actionable message,
+  ///  2. only then enumerate, hash and upload.
+  ///
+  /// A rejected token offers a single re-authentication prompt; a branch that
+  /// moved under us triggers a single clean retry.
   static Future<void> pushWorkspace({
     required String token,
     required String owner,
@@ -295,11 +604,41 @@ class GitHubService {
     required String workingDir,
     Set<String>? specificPaths,
     required Function(String message, LogLevel level) onLog,
+    ReauthPrompt? onReauth,
   }) async {
+    var activeToken = sanitizeToken(token);
+
+    final access = await checkRepoAccess(
+      token: activeToken,
+      owner: owner,
+      repoName: repoName,
+    );
+
+    if (access.failure != null) {
+      onLog('[AUTH] ${access.failure!.message}', LogLevel.error);
+      onLog('[HOW TO FIX] ${access.failure!.remedy}', LogLevel.warning);
+
+      if (onReauth != null) {
+        final replacement = await onReauth(access.failure!);
+        if (replacement != null && replacement.trim().isNotEmpty) {
+          activeToken = sanitizeToken(replacement);
+          onLog('Retrying with the new token...', LogLevel.info);
+        } else {
+          onLog('Push cancelled. No files were uploaded.', LogLevel.warning);
+          return;
+        }
+      } else {
+        onLog('Push cancelled. No files were uploaded.', LogLevel.warning);
+        return;
+      }
+    } else {
+      onLog('Repository access verified: ${access.canPush ? 'read + write' : 'read only'}.', LogLevel.success);
+    }
+
     for (int attempt = 0; attempt < 2; attempt++) {
       try {
         await _pushOnce(
-          token: token,
+          token: activeToken,
           owner: owner,
           repoName: repoName,
           branch: branch,
@@ -308,6 +647,11 @@ class GitHubService {
           specificPaths: specificPaths,
           onLog: onLog,
         );
+        return;
+      } on GitHubAuthException catch (e) {
+        onLog('[AUTH] ${e.message}', LogLevel.error);
+        onLog('[HOW TO FIX] ${e.remedy}', LogLevel.warning);
+        onLog('Push aborted. No commit was created.', LogLevel.warning);
         return;
       } on _PushConflict catch (e) {
         if (attempt == 0) {
@@ -396,6 +740,16 @@ class GitHubService {
           headers: _headers(token),
         ).timeout(_requestTimeout);
 
+        if (_isUnauthorized(treeFetchRes)) {
+          throw _authFailureFor(treeFetchRes, token: token, action: 'read the repository tree');
+        }
+        if (_isRateLimited(treeFetchRes)) {
+          throw GitHubAuthException(
+            'GitHub is rate limiting this device.',
+            'Wait a few minutes, then push again.',
+          );
+        }
+
         if (treeFetchRes.statusCode == 200) {
           final treeData = jsonDecode(treeFetchRes.body);
           if (treeData['tree'] is List) {
@@ -482,11 +836,15 @@ class GitHubService {
       int uploadedBytesCounter = 0;
       final failedFiles = <String>[];
       int processedCounter = 0;
+      GitHubAuthException? authFailure;
 
       await _runSlidingPool<_LocalFileToUpload>(
         items: filesToUpload,
         concurrency: 16,
         worker: (item) async {
+          // Once auth fails, stop burning through the remaining files: the
+          // 401s would all be identical and the real problem is one token.
+          if (authFailure != null) return;
           try {
             // Read only inside the worker so peak memory stays bounded even
             // for large batches.
@@ -506,6 +864,19 @@ class GitHubService {
               }),
             ).timeout(const Duration(seconds: 60));
 
+            if (_isUnauthorized(blobRes)) {
+              authFailure ??= _authFailureFor(blobRes, token: token, action: 'upload files');
+              return;
+            }
+
+            if (_isRateLimited(blobRes)) {
+              authFailure ??= GitHubAuthException(
+                'GitHub is rate limiting this device mid-upload.',
+                'Wait a few minutes and push again. Files already uploaded are cached.',
+              );
+              return;
+            }
+
             if (blobRes.statusCode == 201) {
               final blobSha = jsonDecode(blobRes.body)['sha'];
               treeNodes.add({
@@ -522,8 +893,10 @@ class GitHubService {
               onLog('Blob upload failed for ${item.relPath}: ${_extractMessage(blobRes)}', LogLevel.error);
             }
           } catch (e) {
-            failedFiles.add(item.relPath);
-            onLog('Blob upload error for ${item.relPath}: $e', LogLevel.error);
+            if (authFailure == null) {
+              failedFiles.add(item.relPath);
+              onLog('Blob upload error for ${item.relPath}: $e', LogLevel.error);
+            }
           } finally {
             processedCounter++;
             if (processedCounter % 15 == 0 || processedCounter == filesToUpload.length) {
@@ -536,6 +909,15 @@ class GitHubService {
           }
         },
       );
+
+      if (authFailure != null) {
+        // Abort before the commit: nothing is written to the branch.
+        onLog(
+          '[ABORTED] Authentication failed while uploading. Nothing was committed; the branch is unchanged.',
+          LogLevel.error,
+        );
+        throw authFailure!;
+      }
 
       if (failedFiles.isNotEmpty) {
         onLog(
@@ -556,6 +938,9 @@ class GitHubService {
         body: jsonEncode(treePayload),
       ).timeout(const Duration(seconds: 60));
 
+      if (_isUnauthorized(treeRes)) {
+        throw _authFailureFor(treeRes, token: token, action: 'create the git tree');
+      }
       if (treeRes.statusCode != 201) {
         onLog('Failed to create Git Tree: ${_extractMessage(treeRes)}', LogLevel.error);
         return;
@@ -575,6 +960,9 @@ class GitHubService {
         body: jsonEncode(commitPayload),
       ).timeout(const Duration(seconds: 60));
 
+      if (_isUnauthorized(commitRes)) {
+        throw _authFailureFor(commitRes, token: token, action: 'create the commit');
+      }
       if (commitRes.statusCode != 201) {
         onLog('Failed to create commit: ${_extractMessage(commitRes)}', LogLevel.error);
         return;

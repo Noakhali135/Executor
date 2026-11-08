@@ -74,7 +74,14 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       _isLoadingRepos = true;
     });
 
-    final repos = await GitHubService.getUserRepos(token);
+    final result = await GitHubService.getUserRepos(token);
+    final repos = result.repos;
+
+    if (result.error != null && mounted && repos.isEmpty) {
+      widget.onLog('[AUTH] ${result.error!}', LogLevel.error);
+      setState(() => _isLoadingRepos = false);
+      return;
+    }
 
     if (mounted) {
       final target = preferredRepo ?? _selectedRepo;
@@ -190,6 +197,11 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       await GitHubService.saveRepo(targetRepo);
     }
 
+    // Capture a context that outlives this dialog: the re-auth prompt is shown
+    // *after* this dialog is popped so the user can watch the terminal, and
+    // this dialog's own context would already be deactivated by then.
+    final navigatorContext = Navigator.of(context, rootNavigator: true).context;
+
     if (mounted) Navigator.pop(context);
 
     // The dialog is gone but the callback still targets the Runner's log list,
@@ -203,7 +215,100 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       workingDir: widget.workingDir,
       specificPaths: _pushSelectedOnly ? widget.selectedExplorerPaths : null,
       onLog: widget.onLog,
+      onReauth: (error) => _promptForNewToken(navigatorContext, error),
     );
+  }
+
+  /// Shown from the Runner's log when a push fails on auth: lets the user
+  /// replace the stored token without leaving the flow.
+  Future<String?> _promptForNewToken(
+    BuildContext navigatorContext,
+    GitHubAuthException error,
+  ) async {
+    // The caller's own context is gone by now; validate against the navigator.
+    if (!navigatorContext.mounted) return null;
+
+    final controller = TextEditingController();
+    try {
+      final newToken = await showDialog<String>(
+        context: navigatorContext,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF111827),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: Color(0xFF7F1D1D)),
+          ),
+          title: const Row(
+            children: [
+              Icon(Icons.key_off_rounded, color: Color(0xFFF87171), size: 18),
+              SizedBox(width: 8),
+              Text(
+                'GitHub rejected the token',
+                style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                error.message,
+                style: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 12, height: 1.35),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                error.remedy,
+                style: const TextStyle(color: Color(0xFFCBD5E1), fontSize: 12, height: 1.35),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                obscureText: true,
+                style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 12.5),
+                decoration: InputDecoration(
+                  hintText: 'ghp_… or github_pat_…',
+                  hintStyle: const TextStyle(color: Color(0xFF475569)),
+                  filled: true,
+                  fillColor: const Color(0xFF080C16),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel', style: TextStyle(color: Color(0xFF94A3B8))),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF6366F1),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              child: const Text('Retry push', style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        ),
+      );
+
+      if (newToken == null || newToken.isEmpty) return null;
+
+      final verified = await GitHubService.verifyToken(newToken);
+      if (verified.success && verified.username != null) {
+        await GitHubService.saveToken(newToken, verified.username!);
+        return newToken;
+      }
+      widget.onLog(
+        '[AUTH] The replacement token was rejected too: '
+        '${verified.errorMessage ?? 'unknown error'}',
+        LogLevel.error,
+      );
+      return null;
+    } finally {
+      controller.dispose();
+    }
   }
 
   @override
@@ -260,7 +365,8 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
         ),
         const SizedBox(height: 4),
         const Text(
-          'Use a Personal Access Token (PAT). Classic Token with "repo" scope is recommended.',
+          'Use a Personal Access Token. Classic tokens need the "repo" scope; '
+          'fine-grained tokens need Contents: Read and write on each repo.',
           style: TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
         ),
         const SizedBox(height: 12),

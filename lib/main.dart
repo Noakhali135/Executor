@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'screens/runner_screen.dart';
@@ -72,11 +73,22 @@ class _MainShellScreenState extends State<MainShellScreen> {
 
   Future<void> _loadInitialState() async {
     final savedPath = await StorageService.getSavedDirectory();
+
     if (savedPath != null && savedPath.isNotEmpty) {
-      setState(() {
-        _workingDir = savedPath;
-      });
+      // Only reuse a saved directory that still exists, so a stale path (or an
+      // SD card that was removed) cannot leave the Runner pointing at nothing.
+      if (Directory(savedPath).existsSync()) {
+        if (mounted) setState(() => _workingDir = savedPath);
+        return;
+      }
     }
+
+    // First launch: fall back to the app's own workspace, which requires no
+    // storage permission at all.
+    final defaultDir = await StorageService.defaultWorkspaceDir();
+    if (!mounted) return;
+    setState(() => _workingDir = defaultDir);
+    await StorageService.saveDirectory(defaultDir);
   }
 
   void _onDirectoryChanged(String newDir) {
