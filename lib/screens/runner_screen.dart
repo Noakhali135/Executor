@@ -231,10 +231,10 @@ class _RunnerScreenState extends State<RunnerScreen> {
     }
 
     if (plan.deleteCount > 0 || plan.rejected.isNotEmpty) {
-      _isReviewing = true;
+      setState(() => _isReviewing = true);
       final approved = await _confirmExecution(plan);
       if (!mounted) return;
-      _isReviewing = false;
+      setState(() => _isReviewing = false);
       if (!approved) {
         _addLog('Execution cancelled before any change was made.', LogLevel.warning);
         return;
