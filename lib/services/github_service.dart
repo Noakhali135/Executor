@@ -40,6 +40,12 @@ class GitHubAuthException implements Exception {
   String toString() => '$message $remedy';
 }
 
+/// Asks the user for a fresh token when the stored one is rejected.
+///
+/// Returning `null` means "not now"; returning a string means the caller
+/// should retry with it.
+typedef ReauthPrompt = Future<String?> Function(GitHubAuthException error);
+
 /// Result of listing the authenticated user's repositories.
 class RepoListResult {
   final List<Map<String, dynamic>> repos;
@@ -317,8 +323,7 @@ class GitHubService {
 
     final scopeNote = scopeHeader.trim().isEmpty
         ? 'The token exposes no OAuth scopes.'
-        : 'Token scopes: "$scopeHeader".'
-        + (accepted.trim().isEmpty ? '' : ' This call needs: "$accepted".');
+        : 'Token scopes: "$scopeHeader".${accepted.trim().isEmpty ? '' : ' This call needs: "$accepted".'}';
 
     final remedy = isFineGrained
         ? 'This is a fine-grained token (github_pat_…). Open it in GitHub → '
@@ -580,12 +585,6 @@ class GitHubService {
     await Future.wait(futures);
   }
 
-  /// Asks the user for a fresh token when the stored one is rejected.
-  ///
-  /// Returning `null` means "not now"; returning a string means the caller
-  /// should retry with it.
-  typedef ReauthPrompt = Future<String?> Function(GitHubAuthException error);
-
   /// Pushes the workspace.
   ///
   /// Order of operations is deliberately "cheap check first":
@@ -608,31 +607,39 @@ class GitHubService {
   }) async {
     var activeToken = sanitizeToken(token);
 
-    final access = await checkRepoAccess(
-      token: activeToken,
-      owner: owner,
-      repoName: repoName,
-    );
+    // Two attempts: one with the stored token, one with a replacement if the
+    // user supplies one after the pre-flight check rejects it.
+    for (int authAttempt = 0; authAttempt < 2; authAttempt++) {
+      final access = await checkRepoAccess(
+        token: activeToken,
+        owner: owner,
+        repoName: repoName,
+      );
 
-    if (access.failure != null) {
+      if (access.failure == null) {
+        onLog(
+          'Repository access verified: ${access.canPush ? 'read + write' : 'read only'}.',
+          LogLevel.success,
+        );
+        break;
+      }
+
       onLog('[AUTH] ${access.failure!.message}', LogLevel.error);
       onLog('[HOW TO FIX] ${access.failure!.remedy}', LogLevel.warning);
 
-      if (onReauth != null) {
-        final replacement = await onReauth(access.failure!);
-        if (replacement != null && replacement.trim().isNotEmpty) {
-          activeToken = sanitizeToken(replacement);
-          onLog('Retrying with the new token...', LogLevel.info);
-        } else {
-          onLog('Push cancelled. No files were uploaded.', LogLevel.warning);
-          return;
-        }
-      } else {
+      final replacement = onReauth == null ? null : await onReauth(access.failure!);
+      if (replacement == null || replacement.trim().isEmpty) {
         onLog('Push cancelled. No files were uploaded.', LogLevel.warning);
         return;
       }
-    } else {
-      onLog('Repository access verified: ${access.canPush ? 'read + write' : 'read only'}.', LogLevel.success);
+
+      activeToken = sanitizeToken(replacement);
+      onLog('Retrying with the new token...', LogLevel.info);
+
+      if (authAttempt == 1) {
+        onLog('Push cancelled: the replacement token was rejected as well.', LogLevel.error);
+        return;
+      }
     }
 
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -1027,6 +1034,11 @@ class GitHubService {
         }
       }
     } on _PushConflict {
+      // Handled by the retry wrapper.
+      rethrow;
+    } on GitHubAuthException {
+      // Must reach the wrapper too, or the actionable remedy and the retry
+      // prompt are lost to the generic handler below.
       rethrow;
     } on TimeoutException {
       onLog('Request timed out. The network is slow or GitHub is unreachable.', LogLevel.error);
