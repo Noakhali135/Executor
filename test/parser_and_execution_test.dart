@@ -330,6 +330,53 @@ void main() {
       expect(result.ok, isTrue);
     });
 
+    test('writing the same path twice replaces its content', () async {
+      // A re-run of the same block must overwrite, never create "main (1).py".
+      final actions = [
+        const CommandAction(
+          type: ActionType.writeFile,
+          relativePath: 'src/main.py',
+          content: 'first',
+          index: 1,
+        ),
+      ];
+      await run(actions);
+      await run([
+        const CommandAction(
+          type: ActionType.writeFile,
+          relativePath: 'src/main.py',
+          content: 'second',
+          index: 1,
+        ),
+      ]);
+
+      final files = Directory(p.join(tempRoot.path, 'src'))
+          .listSync()
+          .whereType<File>()
+          .map((f) => p.basename(f.path))
+          .toList();
+      expect(files, ['main.py'], reason: 'no duplicate file may appear');
+      expect(File(p.join(tempRoot.path, 'src', 'main.py')).readAsStringSync(),
+          'second');
+    });
+
+    test('a shorter body leaves no tail from the previous file', () async {
+      await File(p.join(tempRoot.path, 'trim.txt'))
+          .writeAsString('a much longer original body\n');
+
+      await run([
+        const CommandAction(
+          type: ActionType.writeFile,
+          relativePath: 'trim.txt',
+          content: 'short',
+          index: 1,
+        ),
+      ]);
+
+      // The file must be truncated, not partially overwritten.
+      expect(File(p.join(tempRoot.path, 'trim.txt')).readAsStringSync(), 'short');
+    });
+
     test('backs up an existing file before overwriting', () async {
       final target = File(p.join(tempRoot.path, 'keep.txt'));
       await target.writeAsString('original');

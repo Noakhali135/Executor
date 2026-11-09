@@ -40,6 +40,14 @@ class SafWorkspace(private val activity: Activity) {
 
         private const val CACHE_LIMIT = 20000
 
+        /**
+         * Extensions a ContentProvider appends when the MIME type disagrees with
+         * the file name. Older builds created files as `text/plain`, so
+         * `main.py` landed on disk as `main.py.txt`; those files must still be
+         * found and replaced rather than duplicated as `main (1).py.txt`.
+         */
+        private val PROVIDER_APPENDED_EXTENSIONS = listOf(".txt", ".bin")
+
         const val VIRTUAL_ROOT = "/devrunner-saf"
         private const val REQUEST_OPEN_TREE = 0x5AF1
         private const val PREFS = "devrunner_saf"
@@ -466,7 +474,13 @@ class SafWorkspace(private val activity: Activity) {
 
     /** Deletes a file or an empty/recursive directory. */
     fun deletePath(virtualPath: String): Boolean {
-        val doc = resolve(virtualPath) ?: return false
+        val parentPath = virtualPath.substringBeforeLast('/', "")
+        val name = virtualPath.substringAfterLast('/')
+        val doc = resolve(virtualPath) ?: run {
+            val parentVirtual = if (parentPath.isEmpty()) VIRTUAL_ROOT else parentPath
+            val parent = resolve(parentVirtual) ?: return false
+            findChild(parent, name) ?: return false
+        }
         val deleted = try {
             doc.delete()
         } catch (_: Exception) {
@@ -486,7 +500,77 @@ class SafWorkspace(private val activity: Activity) {
         }
     }
 
-    /** Writes bytes to a SAF file, creating it when missing. */
+    /**
+     * MIME type for a file, chosen so the provider keeps the name you asked for.
+     *
+     * This matters more than it looks. `DocumentFile.createFile("text/plain",
+     * "main.py")` does not create `main.py`: the provider appends an extension
+     * for the MIME type, so the file becomes `main.py.txt`. The display name is
+     * the thing that must win, so the MIME is derived from the name.
+     */
+    private fun mimeFor(name: String): String = when (name.substringAfterLast('.', "").lowercase()) {
+        "py" -> "text/x-python"
+        "js" -> "application/javascript"
+        "mjs", "cjs" -> "application/javascript"
+        "ts" -> "application/typescript"
+        "tsx" -> "application/typescript"
+        "jsx" -> "application/javascript"
+        "json" -> "application/json"
+        "kt", "kts" -> "text/x-kotlin"
+        "java" -> "text/x-java-source"
+        "dart" -> "text/x-dart"
+        "yaml", "yml" -> "text/yaml"
+        "toml", "ini" -> "text/plain"
+        "md" -> "text/markdown"
+        "xml" -> "text/xml"
+        "html", "htm" -> "text/html"
+        "css" -> "text/css"
+        "csv" -> "text/csv"
+        "sh" -> "application/x-sh"
+        "gradle" -> "text/x-gradle"
+        "txt", "text", "log", "" -> "text/plain"
+        else -> "application/octet-stream"
+    }
+
+    /**
+     * Finds an existing child by name, tolerating a provider-mangled name.
+     *
+     * `findFile` is an exact match. A file written by an earlier build may be
+     * stored as `main.py.txt`, and an exact match misses it - which is how a
+     * re-run created `main (1).py` instead of overwriting the file.
+     */
+    private fun findChild(parent: DocumentFile, name: String): DocumentFile? {
+        // Exact name first: a real `main.py` always wins over a leftover.
+        parent.findFile(name)?.let { return it }
+
+        val children = try {
+            parent.listFiles()
+        } catch (_: Exception) {
+            return null
+        }
+        // Only the suffixes a provider itself appends are treated as the same
+        // file. Accepting any `name.*` would redirect a write onto a genuine
+        // `main.py.bak` and silently destroy it.
+        return children
+            .filter { child ->
+                val childName = child.name ?: return@filter false
+                child.isFile && PROVIDER_APPENDED_EXTENSIONS.any { childName == "$name$it" }
+            }
+            .minByOrNull { it.name?.length ?: Int.MAX_VALUE }
+    }
+
+    /**
+     * Writes bytes to a SAF file, replacing its contents when it exists.
+     *
+     * Resolution order for the existing file is deliberate:
+     *
+     *  1. by document id, which cannot be fooled by name mangling;
+     *  2. by exact name;
+     *  3. anything in the folder whose id prefix matches the name, which is how
+     *     a file written by an earlier build survives as `main.py.txt` - it is
+     *     overwritten in place instead of producing `main (1).py.txt`;
+     *  4. create it, with the right MIME so the name is not mangled again.
+     */
     fun writeFile(virtualPath: String, bytes: ByteArray): Boolean {
         val parentPath = virtualPath.substringBeforeLast('/', "")
         val name = virtualPath.substringAfterLast('/')
@@ -494,23 +578,58 @@ class SafWorkspace(private val activity: Activity) {
 
         val parentVirtual = if (parentPath.isEmpty()) VIRTUAL_ROOT else parentPath
         val parent = resolveOrCreateDirectory(parentVirtual) ?: return false
-        val existing = parent.findFile(name)
-        // "text/plain" keeps the original name; application/octet-stream makes
-        // some providers append a .bin extension.
-        val target = existing ?: parent.createFile("text/plain", name) ?: return false
 
+        // Existing file, by id, by exact name, or by the mangled name an older
+        // build produced. `val`, because a captured local cannot rely on the
+        // smart cast a `var` would need.
+        val target: DocumentFile = resolve(virtualPath)
+            ?: findChild(parent, name)
+            // Create with a name-derived MIME so the provider does not append
+            // ".txt" to "main.py".
+            ?: parent.createFile(mimeFor(name), name)
+            ?: return false
+
+        // "wt" truncates. Without it a shorter body would leave the tail of the
+        // previous, longer file behind.
         val written = try {
-            context.contentResolver.openOutputStream(target.uri, "wt")?.use {
-                it.write(bytes)
-                it.flush()
+            val stream = context.contentResolver.openOutputStream(target.uri, "wt")
+            if (stream == null) {
+                false
+            } else {
+                stream.use {
+                    it.write(bytes)
+                    it.flush()
+                }
+                true
             }
-            true
         } catch (_: Exception) {
             false
         }
-        // A provider may replace the document on write; drop stale handles.
-        if (written) invalidateCache(virtualPath)
-        return written
+
+        // Writing may replace the document, so a cached handle can go stale.
+        invalidateCache(virtualPath)
+        if (!written) return false
+
+        // A wrong extension cannot be renamed through DocumentFile, but it can
+        // be renamed through DocumentsContract - and a file that came back as
+        // "main.py.txt" would be invisible to the next write without it.
+        renameIfProviderMangled(target, name)
+        return true
+    }
+
+    /** Renames `main.py.txt` back to `main.py` when the provider added a suffix. */
+    private fun renameIfProviderMangled(doc: DocumentFile, desired: String) {
+        val actual = doc.name ?: return
+        if (actual == desired) return
+        // Only correct the specific damage a provider adds ("main.py" became
+        // "main.py.txt"). A file the user genuinely named differently is left
+        // alone, so this can never clobber an unrelated file.
+        if (PROVIDER_APPENDED_EXTENSIONS.none { actual == "$desired$it" }) return
+        try {
+            DocumentsContract.renameDocument(context.contentResolver, doc.uri, desired)
+        } catch (_: Exception) {
+            // Not fatal: the content is correct, only the name is longer.
+        }
     }
 
     private fun resolveOrCreateDirectory(virtualPath: String): DocumentFile? {

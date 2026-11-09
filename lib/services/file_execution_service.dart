@@ -17,6 +17,10 @@ class PlannedAction {
   /// True when a FILE_WRITE would replace a file that already exists.
   final bool overwrites;
 
+  /// Whether the target existed when the plan was made. Deleting something that
+  /// is not there is reported once, at validation, instead of twice.
+  bool existedAtPlanTime = false;
+
   /// Lines removed/added, filled in after the write.
   int removedLines = 0;
   int addedLines = 0;
@@ -128,7 +132,7 @@ class FileExecutionService {
           action: action,
           targetPath: target,
           overwrites: exists && action.type == ActionType.writeFile,
-        ));
+        )..existedAtPlanTime = exists);
       } on UnsafePathException catch (e) {
         errors.add('Block ${action.index}: ${action.relativePath} — ${e.reason}');
         items.add(PlannedAction(action: action, rejection: e.reason));
@@ -165,16 +169,16 @@ class FileExecutionService {
     );
     emit('Parsing blocks...', LogKind.info);
 
-    // Blocks the parser accepted, in input order. Columns are padded so the
-    // paths line up, which is what makes a long run scannable.
+    // Blocks the parser accepted, in input order. Only the action name is
+    // padded: trailing spaces after a path are invisible in the log but show up
+    // the moment anything is copied or compared.
     for (final action in actions) {
       final suffix = action.type == ActionType.writeFile
           ? ' (${_plural(action.lineCount, 'line', 'lines')})'
           : '';
       emit(
-        'Block ${action.index}: ${action.displayName.padRight(14)}'
-        ' ${action.relativePath.padRight(20)}'
-        '$suffix',
+        'Block ${action.index}: ${action.displayName.padRight(14)} '
+        '${action.relativePath}$suffix',
         LogKind.ok,
       );
     }
@@ -222,14 +226,15 @@ class FileExecutionService {
     emit('Paths are relative and inside project root', LogKind.ok);
     emit('Every FILE_WRITE has a closing <<<END>>>', LogKind.ok);
 
-    // Worth stating for a delete: whether the target is really there.
+    // Worth stating for a delete: whether the target is really there. This is
+    // the only place it is said, so the log does not repeat itself later.
     for (final item in plan.runnable) {
       if (!item.action.isDestructive) continue;
-      final exists = await WorkspaceFs.exists(item.targetPath!);
+      final what = item.action.type == ActionType.deleteFolder ? 'folder' : 'file';
       emit(
         '${item.action.relativePath} '
-        '${exists ? 'exists, safe to delete' : 'does not exist'}',
-        exists ? LogKind.ok : LogKind.warn,
+        '${item.existedAtPlanTime ? 'exists, safe to delete' : '$what does not exist'}',
+        item.existedAtPlanTime ? LogKind.ok : LogKind.warn,
       );
     }
 
@@ -351,8 +356,8 @@ class FileExecutionService {
             applied++;
 
           case ActionType.deleteFile:
+            // Already reported during validation; saying it twice adds nothing.
             if (!await WorkspaceFs.exists(target)) {
-              emit('${a.relativePath} does not exist', LogKind.warn);
               skipped++;
             } else if (await WorkspaceFs.delete(target)) {
               emit('Deleted ${a.relativePath}', LogKind.ok);
@@ -376,7 +381,6 @@ class FileExecutionService {
 
           case ActionType.deleteFolder:
             if (!await WorkspaceFs.exists(target)) {
-              emit('Folder ${a.relativePath} does not exist', LogKind.warn);
               skipped++;
             } else if (await WorkspaceFs.delete(target)) {
               emit('Deleted folder ${a.relativePath}/', LogKind.ok);
