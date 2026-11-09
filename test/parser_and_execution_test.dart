@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:executor/models/command_action.dart';
@@ -73,6 +74,20 @@ void main() {
         expect(PathGuard.validateRelativePath(good), isNull,
             reason: '"$good" should be accepted');
       }
+    });
+
+    test('validateRelativePath refuses paths that would break the project', () {
+      for (final bad in ['.git/config', '.git', '.backup/x/y', 'a>>>b.txt']) {
+        expect(PathGuard.validateRelativePath(bad), isNotNull,
+            reason: '"$bad" must be refused');
+      }
+    });
+
+    test('validateRelativePath caps nesting', () {
+      final deep = List.generate(40, (i) => 'd$i').join('/');
+      expect(PathGuard.validateRelativePath('$deep/f.txt'), isNotNull);
+      final fine = List.generate(10, (i) => 'd$i').join('/');
+      expect(PathGuard.validateRelativePath('$fine/f.txt'), isNull);
     });
 
     test('validateRelativePath rejects anything that leaves the project', () {
@@ -285,6 +300,30 @@ void main() {
       expect(byPath['b.txt'], 'beta\n\n');
     });
 
+    test('non-Latin text survives a write -> read round trip', () async {
+      // codeUnits/fromCharCodes treated UTF-16 code units as bytes, which
+      // turned Bengali into mojibake and truncated every emoji.
+      const body = 'হ্যালো বিশ্ব 🌍 café ñ 日本語';
+      final file = File(p.join(tempRoot.path, 'unicode.txt'));
+
+      await WorkspaceFs.writeString(file.path, body);
+      expect(await WorkspaceFs.readString(file.path), body);
+      // The bytes on disk must be real UTF-8, not one byte per code unit.
+      expect(await file.readAsBytes(), utf8.encode(body));
+    });
+
+    test('unicode survives export -> parse unchanged', () async {
+      const body = 'print("হ্যালো 🌍")\n';
+      final file = File(p.join(tempRoot.path, 'u.py'));
+      await file.writeAsString(body);
+
+      final exported = await ExportService.generateBatchExport(
+        rootDir: tempRoot.path,
+        selectedPaths: {file.path},
+      );
+      expect(CommandParserService.parse(exported).actions.single.content, body);
+    });
+
     test('binary files are not exported as text', () async {
       final file = File(p.join(tempRoot.path, 'img.png'));
       await file.writeAsBytes([0x89, 0x50, 0x4E, 0x47, 0x00, 0x01, 0x02]);
@@ -296,6 +335,27 @@ void main() {
 
       // A text placeholder would overwrite the real bytes with ASCII.
       expect(exported, isNot(contains('FILE_WRITE')));
+    });
+  });
+
+  group('Rejected blocks', () {
+    test('every rejected block is recorded in block order', () {
+      final result = CommandParserService.parse(
+        '<<<FILE_WRITE path="../a.txt">>>\nx\n<<<END>>>\n'
+        '<<<FILE_WRITE path="/etc/passwd">>>\nx\n<<<END>>>\n'
+        '<<<FILE_WRITE path="">>>\nx\n<<<END>>>\n'
+        '<<<FILE_WRITE path=".git/config">>>\nx\n<<<END>>>',
+      );
+
+      expect(result.rejections.map((r) => r.index), [1, 2, 3, 4]);
+      expect(result.rejections.map((r) => r.action), everyElement('FILE_WRITE'));
+      expect(result.rejections.first.reason, contains('escapes the project'));
+    });
+
+    test('an unknown tag is recorded with the tag verbatim', () {
+      final result = CommandParserService.parse('<<<FILE_RENAME path="a.txt">>>');
+      expect(result.rejections.single.action, 'FILE_RENAME');
+      expect(result.rejections.single.reason, contains('unknown action'));
     });
   });
 
@@ -470,6 +530,68 @@ void main() {
       expect(result.applied, 1);
       expect(result.skipped, 1);
       expect(result.failed, 0);
+    });
+
+    test('a bad block does not discard the good ones when skipping', () async {
+      final result = await FileExecutionService.execute(
+        rootDir: tempRoot.path,
+        actions: [
+          const CommandAction(
+            type: ActionType.writeFile,
+            relativePath: 'keep1.txt',
+            content: 'a',
+            index: 1,
+          ),
+          const CommandAction(
+            type: ActionType.writeFile,
+            relativePath: 'keep2.txt',
+            content: 'b',
+            index: 3,
+          ),
+        ],
+        report: const ParseReport(
+          blockCount: 3,
+          charCount: 100,
+          errors: ['Block 2: FILE_WRITE ../evil.txt — path escapes the project root'],
+          rejections: [
+            RejectionEntry(
+              index: 2,
+              action: 'FILE_WRITE',
+              path: '../evil.txt',
+              reason: 'path escapes the project root',
+            ),
+          ],
+        ),
+        options: const ExecuteOptions(skipInvalid: true),
+        onLog: (_) {},
+      );
+
+      expect(result.applied, 2);
+      expect(File(p.join(tempRoot.path, 'keep1.txt')).existsSync(), isTrue);
+      expect(File(p.join(tempRoot.path, 'keep2.txt')).existsSync(), isTrue);
+    });
+
+    test('without skipInvalid the same batch changes nothing', () async {
+      final result = await FileExecutionService.execute(
+        rootDir: tempRoot.path,
+        actions: [
+          const CommandAction(
+            type: ActionType.writeFile,
+            relativePath: 'nope.txt',
+            content: 'a',
+            index: 1,
+          ),
+        ],
+        report: const ParseReport(
+          blockCount: 2,
+          charCount: 10,
+          errors: ['Block 2: something is wrong'],
+        ),
+        onLog: (_) {},
+      );
+
+      expect(result.aborted, isTrue);
+      expect(File(p.join(tempRoot.path, 'nope.txt')).existsSync(), isFalse);
     });
 
     test('plan() counts writes and destructive actions', () async {

@@ -73,6 +73,12 @@ class FileExecutionService {
   /// Batch files larger than this are left alone rather than copied.
   static const int maxBackupBytes = 5 * 1024 * 1024;
 
+  /// How many `.backup/<timestamp>/` runs to keep.
+  ///
+  /// Without a limit every run left its own directory behind forever: 2000 runs
+  /// is 2000 directories in the project, which the tree walk then has to walk.
+  static const int keepBackupRuns = 10;
+
   /// Resolves and validates everything before any file is touched.
   ///
   /// This is what makes the "no files were changed" guarantee real: every path
@@ -157,6 +163,7 @@ class FileExecutionService {
     required void Function(TerminalLog log) onLog,
     Future<bool> Function(PlanSummary plan)? confirm,
     bool dryRun = false,
+    ExecuteOptions options = const ExecuteOptions(),
   }) async {
     void emit(String message, LogKind kind) =>
         onLog(TerminalLog(message: message, kind: kind));
@@ -169,10 +176,12 @@ class FileExecutionService {
     );
     emit('Parsing blocks...', LogKind.info);
 
-    // Blocks the parser accepted, in input order. Only the action name is
-    // padded: trailing spaces after a path are invisible in the log but show up
-    // the moment anything is copied or compared.
-    for (final action in actions) {
+    // ---- block table ---------------------------------------------------
+    // One line per accepted block, sorted by block number. Only the action name
+    // is padded: trailing spaces after a path are invisible in the log but show
+    // up the moment a line is copied.
+    final ordered = [...actions]..sort((a, b) => a.index.compareTo(b.index));
+    for (final action in ordered) {
       final suffix = action.type == ActionType.writeFile
           ? ' (${_plural(action.lineCount, 'line', 'lines')})'
           : '';
@@ -183,17 +192,26 @@ class FileExecutionService {
       );
     }
 
-    // Blocks the parser rejected, each reported once.
-    for (final error in report.errors) {
-      emit(error, LogKind.error);
+    // REJECTED marker rows, so every block in the input appears exactly once
+    // and in order. Previously the errors came after the table, which read as
+    // though block 7 had been accepted while blocks 1-6 were still pending.
+    for (final entry in report.rejections) {
+      emit(
+        'Block ${entry.index}: ${entry.action.padRight(14)} '
+        '${entry.path} — ${entry.reason}',
+        LogKind.error,
+      );
     }
+
     for (final warning in report.warnings) {
       emit(warning, LogKind.warn);
     }
 
-    // A parse error means the input cannot be trusted: stop before writing.
-    // Without this a block with a missing END could be written from a guess.
-    if (report.errors.isNotEmpty) {
+    // A malformed block means its own content cannot be trusted - but that is
+    // no reason to discard the blocks that are fine. Whether we carry on is
+    // the user's call (options.skipInvalid); the default stays all-or-nothing.
+    final skipping = options.skipInvalid && actions.isNotEmpty;
+    if (report.errors.isNotEmpty && !skipping) {
       emit(
         'Validation failed (${_plural(report.errors.length, 'error', 'errors')}).'
         ' No files were changed.',
@@ -206,6 +224,14 @@ class FileExecutionService {
     if (actions.isEmpty) {
       emit('No blocks found. Nothing to do.', LogKind.warn);
       return const BatchResult();
+    }
+
+    if (report.errors.isNotEmpty) {
+      emit(
+        'Skipping ${_plural(report.errors.length, 'invalid block', 'invalid blocks')};'
+        ' applying the rest.',
+        LogKind.warn,
+      );
     }
 
     // ---- 2. validate ---------------------------------------------------
@@ -247,7 +273,7 @@ class FileExecutionService {
       );
     }
 
-    if (plan.rejected.isNotEmpty) {
+    if (plan.rejected.isNotEmpty && !skipping) {
       final count = plan.rejected.length;
       emit(
         'Validation failed (${_plural(count, 'error', 'errors')}).'
@@ -261,6 +287,14 @@ class FileExecutionService {
         onLog,
       );
       return BatchResult(aborted: true, failed: count);
+    }
+
+    if (plan.rejected.isNotEmpty) {
+      emit(
+        'Skipping ${_plural(plan.rejected.length, 'invalid block', 'invalid blocks')};'
+        ' applying the rest.',
+        LogKind.warn,
+      );
     }
 
     final runnable = plan.runnable.toList();
@@ -282,6 +316,9 @@ class FileExecutionService {
     final stamp = _stamp(DateTime.now());
     final backupDir = p.join(rootDir, '.backup', stamp);
     var backedUp = 0;
+
+    // Keep the undo history bounded: the newest N runs, oldest removed first.
+    await _pruneBackups(rootDir, onLog: emit, keep: keepBackupRuns);
 
     for (final item in runnable) {
       if (!await WorkspaceFs.exists(item.targetPath!)) continue;
@@ -340,6 +377,13 @@ class FileExecutionService {
               continue;
             }
             if (item.overwrites) {
+              if (before == a.content) {
+                // Same bytes already on disk. Writing again would report
+                // "+0 / -0 lines", which reads like a change that did nothing.
+                emit('${a.relativePath} unchanged (already up to date)', LogKind.ok);
+                skipped++;
+                continue;
+              }
               final diff = _lineDiff(before, a.content);
               emit(
                 'Wrote ${a.relativePath} (overwritten, '
@@ -348,8 +392,8 @@ class FileExecutionService {
               );
             } else {
               emit(
-                'Wrote ${a.relativePath} (new, '
-                '${_plural(a.lineCount, 'line', 'lines')})',
+                'Wrote ${a.relativePath} '
+                '(new, ${_plural(a.lineCount, 'line', 'lines')})',
                 LogKind.ok,
               );
             }
@@ -396,12 +440,20 @@ class FileExecutionService {
       }
     }
 
-    emit(
-      '$applied of ${runnable.length} actions applied, $failed failed'
-      '${skipped > 0 ? ', $skipped skipped' : ''}'
-      '${backedUp > 0 ? ', $backedUp backed up' : ''}',
-      failed == 0 ? LogKind.done : LogKind.fail,
-    );
+    // "applied" is the number that actually changed something, so "2 of 3" never
+    // appears without saying which one was skipped and why it did not count.
+    final counted = runnable.length;
+    final parts = <String>[
+      '$applied of $counted ${counted == 1 ? 'action' : 'actions'} applied',
+    ];
+    if (failed > 0) parts.add('$failed failed');
+    if (skipped > 0) parts.add('$skipped skipped');
+    if (backedUp > 0) parts.add('$backedUp backed up');
+    if (plan.rejected.isNotEmpty) parts.add('${plan.rejected.length} invalid');
+    if (report.errors.isNotEmpty) {
+      parts.add('${report.errors.length} malformed');
+    }
+    emit(parts.join(', '), failed == 0 ? LogKind.done : LogKind.fail);
 
     return BatchResult(applied: applied, failed: failed, skipped: skipped);
   }
@@ -451,6 +503,33 @@ class FileExecutionService {
     );
   }
 
+  /// Deletes the oldest `.backup/<stamp>/` directories beyond [keep].
+  ///
+  /// Failures are ignored: pruning is housekeeping and must never be the reason
+  /// a batch fails.
+  static Future<void> _pruneBackups(
+    String rootDir, {
+    required void Function(String message, LogKind kind) onLog,
+    int keep = 10,
+  }) async {
+    final backupRoot = p.join(rootDir, '.backup');
+    try {
+      if (!await WorkspaceFs.exists(backupRoot)) return;
+      final entries = await WorkspaceFs.listDirectory(backupRoot);
+      final runs = entries.where((e) => e.isDirectory).toList()
+        ..sort((a, b) => a.name.compareTo(b.name));
+
+      if (runs.length < keep) return;
+      final excess = runs.length - keep + 1;
+      for (var i = 0; i < excess && i < runs.length; i++) {
+        await WorkspaceFs.delete(runs[i].path);
+      }
+      onLog('Pruned $excess old backup(s), keeping $keep', LogKind.info);
+    } catch (_) {
+      // Housekeeping only.
+    }
+  }
+
   /// "1 error" / "3 errors" - keeps the FAIL line grammatical at any count.
   static String _plural(int count, String one, String many) =>
       '$count ${count == 1 ? one : many}';
@@ -478,6 +557,19 @@ class FileExecutionService {
   }
 }
 
+/// How a batch should behave when only some blocks are wrong.
+class ExecuteOptions {
+  /// When true, valid blocks are applied even though other blocks failed.
+  ///
+  /// Default is false: an all-or-nothing batch is easier to reason about and
+  /// matches "no files were changed" on failure. With it on, a reply like
+  /// "9 blocks, 1 bad path" still lands the 8 good files, and the summary says
+  /// exactly which block was skipped.
+  final bool skipInvalid;
+
+  const ExecuteOptions({this.skipInvalid = false});
+}
+
 /// Everything the parser produced, plus the hints shown on failure.
 class ParseReport {
   final int blockCount;
@@ -486,11 +578,15 @@ class ParseReport {
   final List<String> warnings;
   final List<String> hints;
 
+  /// Structured form of [errors], so the block table can show every block once.
+  final List<RejectionEntry> rejections;
+
   const ParseReport({
     this.blockCount = 0,
     this.charCount = 0,
     this.errors = const [],
     this.warnings = const [],
     this.hints = const [],
+    this.rejections = const [],
   });
 }

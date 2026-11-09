@@ -121,3 +121,29 @@ class CommandAction {
     return cleaned.substring(0, idx + 1);
   }
 }
+
+/// One rejected block, in a shape that can be printed in input order.
+///
+/// Accepted blocks and rejected blocks are numbered the same way, so a log can
+/// show every block of the input exactly once instead of listing the good ones
+/// and then reporting errors out of order.
+class RejectionEntry {
+  /// 1-based block number, matching [CommandAction.index].
+  final int index;
+
+  /// Action name as written (`FILE_WRITE`, or the unknown tag verbatim).
+  final String action;
+
+  /// Path as written, or a placeholder when it was absent.
+  final String path;
+
+  /// Why it was rejected.
+  final String reason;
+
+  const RejectionEntry({
+    required this.index,
+    required this.action,
+    required this.path,
+    required this.reason,
+  });
+}

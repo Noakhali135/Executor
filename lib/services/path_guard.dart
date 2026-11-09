@@ -137,7 +137,17 @@ class PathGuard {
   static String? validateRelativePath(String raw) {
     final value = raw.trim();
     if (value.isEmpty) return 'path is empty';
+    // Commands are rejected outright: they can never be part of a real name,
+    // and a NUL would silently truncate the path inside the filesystem layer.
     if (value.contains('\u0000')) return 'path contains a NUL byte';
+    for (final code in [0x0A, 0x0D, 0x0B, 0x0C]) {
+      if (value.codeUnits.contains(code)) {
+        return 'path must not contain a line break or control character';
+      }
+    }
+    // `>>>` would end the opening tag early, so the block could not be parsed
+    // unambiguously. Refuse it instead of guessing which half was meant.
+    if (value.contains('>>>')) return 'path must not contain ">>>"';
     if (value.length > 1024) return 'path is too long';
 
     final normalized = value.replaceAll(r'\', '/');
@@ -163,7 +173,20 @@ class PathGuard {
       if (part == '..') return 'path escapes the project root';
     }
 
-    if (parts.length > 64) return 'path is nested too deeply';
+    // 63 is the deepest a path can go in the filesystem anyway; anything
+    // deeper is a mistake or a denial-of-service attempt.
+    if (parts.length > 32) return 'path is nested too deeply';
+
+    // A path that is inside the project can still destroy it. `.git` is the
+    // repository itself - a single write to `.git/config` or a stray
+    // `.git/HEAD` makes the project unpushable - and `.backup` is the only
+    // undo the executor has. Both are refused outright.
+    if (parts.first == '.git') {
+      return 'path is inside .git, which must not be edited by a batch';
+    }
+    if (parts.first == '.backup') {
+      return 'path is inside .backup, which is reserved for the undo copies';
+    }
     return null;
   }
 

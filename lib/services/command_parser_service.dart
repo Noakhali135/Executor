@@ -21,6 +21,9 @@ class ParseResult {
   final List<String> errors;
   final List<String> warnings;
 
+  /// Every rejected block, numbered the same way the accepted ones are.
+  final List<RejectionEntry> rejections;
+
   /// Number of `<<<` blocks seen, including malformed ones.
   final int blockCount;
 
@@ -31,6 +34,7 @@ class ParseResult {
     required this.actions,
     required this.errors,
     this.warnings = const [],
+    this.rejections = const [],
     this.blockCount = 0,
     this.charCount = 0,
   });
@@ -128,6 +132,7 @@ class CommandParserService {
     final actions = <CommandAction>[];
     final errors = <String>[];
     final warnings = <String>[];
+    final rejections = <RejectionEntry>[];
 
     if (rawInput.trim().isEmpty) {
       return const ParseResult(actions: [], errors: ['Input text is empty']);
@@ -185,20 +190,39 @@ class CommandParserService {
 
       if (type == null) {
         errors.add('Block $index: unknown action "$tag" on line ${i + 1}');
+        rejections.add(RejectionEntry(
+          index: index,
+          action: tag,
+          path: '—',
+          reason: 'unknown action',
+        ));
         i++;
         continue;
       }
 
       final path = rawPath.trim();
       if (path.isEmpty) {
-        errors.add('Block $index: ${type.name} is missing path="..."');
-        i++;
+        errors.add('Block $index: $tag is missing path="..."');
+        rejections.add(RejectionEntry(
+          index: index,
+          action: tag,
+          path: '(no path)',
+          reason: 'missing path="..."',
+        ));
+        // A body without a path still owns its lines; consume them.
+        i = _skipToEnd(lines, i + 1, type);
         continue;
       }
 
       final pathProblem = PathGuard.validateRelativePath(path);
       if (pathProblem != null) {
         errors.add('Block $index: $tag $path — $pathProblem');
+        rejections.add(RejectionEntry(
+          index: index,
+          action: tag,
+          path: path,
+          reason: pathProblem,
+        ));
         // Still consumed so the body does not leak into the next block.
         i = _skipToEnd(lines, i + 1, type);
         continue;
@@ -233,6 +257,12 @@ class CommandParserService {
 
       if (bodyEnd < 0) {
         errors.add('Block $index: FILE_WRITE $path is missing <<<END>>>');
+        rejections.add(RejectionEntry(
+          index: index,
+          action: 'FILE_WRITE',
+          path: path,
+          reason: 'missing <<<END>>>',
+        ));
         // Resume at the next opener so later blocks are still parsed. A stray
         // <<<END>>> belonging to this block is consumed here rather than
         // reported as a second, separate error.
@@ -265,17 +295,24 @@ class CommandParserService {
       if (action.type != ActionType.writeFile || action.content.isEmpty) continue;
       final hit = findPlaceholder(action.content);
       if (hit != null) {
+        // `hit.toString()` used to read `line 2: "// rest of code unchanged"`,
+        // which was then quoted again - the quote appeared twice. Print the
+        // location, then the line once, quoted.
         warnings.add(
-          'Block ${action.index} contains placeholder text on ${hit.toString()}: '
+          'Block ${action.index} contains placeholder text on line ${hit.line}: '
           '"${hit.text.trim()}"',
         );
       }
     }
 
+    // Printed in input order, whatever order they were discovered in.
+    rejections.sort((a, b) => a.index.compareTo(b.index));
+
     return ParseResult(
       actions: actions,
       errors: errors,
       warnings: warnings,
+      rejections: rejections,
       blockCount: blockCount,
       charCount: rawInput.length,
     );

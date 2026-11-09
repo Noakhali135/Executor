@@ -39,6 +39,27 @@ print("Hello World")
   destroy the real file.
 - Binary files are never exported as text; a block would replace their bytes
   with ASCII, so they are left out of the batch.
+- Text is UTF-8 in both directions. A BOM is tolerated on read.
+- `.git/**` and `.backup/**` are refused: a batch may not edit the repository
+  or the undo copies. Nesting is capped at 32 levels, paths at 1024 characters,
+  and control characters or `>>>` inside a path are rejected.
+
+### When only some blocks are wrong
+
+By default a batch is all-or-nothing: one bad block means nothing is written.
+The Runner turns on `ExecuteOptions(skipInvalid: true)`, which applies the valid
+blocks and reports the rest:
+
+```
+[11:00:00] OK    Block 1: FILE_WRITE     src/ok1.py (1 line)
+[11:00:00] ERROR Block 2: FILE_WRITE     ../evil.txt — path escapes the project root
+[11:00:00] OK    Block 3: FILE_WRITE     src/ok2.py (1 line)
+[11:00:00] WARN  Skipping 1 invalid block; applying the rest.
+[11:00:00] DONE  2 of 2 actions applied
+```
+
+A block whose body is malformed (no `<<<END>>>`) is always skipped, never
+guessed at, in both modes.
 
 ## Output
 
@@ -74,7 +95,9 @@ changes nothing at all:
 ```
 
 Overwritten files are copied to `.backup/<timestamp>/` first. Batch files over
-5 MB are skipped rather than copied, and the run says so.
+5 MB are skipped rather than copied, and the run says so. Only the newest ten
+backup runs are kept; older ones are pruned so a long-lived project does not
+accumulate thousands of directories.
 
 ## GitHub push: why a 401 happens, and what to do
 

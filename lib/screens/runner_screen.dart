@@ -252,8 +252,12 @@ class _RunnerScreenState extends State<RunnerScreen> {
         charCount: parsed.charCount,
         errors: parsed.errors,
         warnings: parsed.warnings,
+        rejections: parsed.rejections,
         hints: _hintsFor(parsed),
       ),
+      // A reply with one bad path should not throw away eight good files.
+      // Malformed blocks are still skipped, never guessed at.
+      options: const ExecuteOptions(skipInvalid: true),
       // The confirmation sheet is shown by the service, after validation, so a
       // batch with a bad path can never reach a "are you sure?" prompt.
       confirm: (plan) async {
@@ -288,35 +292,52 @@ class _RunnerScreenState extends State<RunnerScreen> {
   }
 
   /// Actionable per-block hints for the HINT block at the end of a failed run.
+  ///
+  /// Built from the structured rejections rather than by matching words in the
+  /// error text, so the hints come out in block order and every block appears
+  /// once. The old string-matching version emitted them in whatever order the
+  /// needles happened to be checked (1, 4, 2, 9, 3, 5 in one real run), and
+  /// silently dropped blocks whose wording it did not recognise.
   List<String> _hintsFor(ParseResult parsed) {
-    final hints = <String>[];
-    final blockOf = RegExp(r'Block (\d+)');
+    final byBlock = <int, String>{};
 
-    /// Turns "Block 2: <problem>" into "Block 2: <what to do about it>".
-    void add(String needle, String remedy, List<String> source) {
-      for (final line in source) {
-        if (!line.contains(needle)) continue;
-        final n = blockOf.firstMatch(line)?.group(1);
-        hints.add(n == null ? remedy : 'Block $n: $remedy');
+    String remedyFor(String reason) {
+      if (reason.contains('missing <<<END>>>')) {
+        return 'add <<<END>>> after the last line';
       }
+      if (reason.contains('missing path')) {
+        return 'add path="..." to the opening tag';
+      }
+      if (reason.contains('unknown action')) {
+        return 'use FILE_WRITE, FILE_DELETE, FOLDER_CREATE or FOLDER_DELETE';
+      }
+      if (reason.contains('placeholder')) {
+        return 'remove the placeholder and write the complete file';
+      }
+      // Everything else the parser reports about a path is a containment rule.
+      return 'use a relative path inside the project';
     }
 
-    const relative = 'use a relative path inside the project';
-    add('missing <<<END>>>', 'add <<<END>>> after the last line', parsed.errors);
-    add('escapes the project root', relative, parsed.errors);
-    add('must be relative', relative, parsed.errors);
-    add('drive letter', relative, parsed.errors);
-    add('contains a ".."', relative, parsed.errors);
-    add('unknown action',
-        'use FILE_WRITE, FILE_DELETE, FOLDER_CREATE or FOLDER_DELETE',
-        parsed.errors);
-    add('placeholder', 'remove the placeholder and write the complete file',
-        parsed.warnings);
-    add('missing path=', 'add path="..." to the opening tag', parsed.errors);
+    for (final rejection in parsed.rejections) {
+      byBlock.putIfAbsent(rejection.index, () => remedyFor(rejection.reason));
+    }
 
-    // De-duplicate: several blocks often share the same remedy.
-    return hints.toSet().toList();
+    // Placeholder warnings are not rejections: the block still parses.
+    final blockOf = RegExp(r'Block (\d+)');
+    for (final warning in parsed.warnings) {
+      if (!warning.contains('placeholder')) continue;
+      final n = int.tryParse(blockOf.firstMatch(warning)?.group(1) ?? '');
+      if (n == null) continue;
+      byBlock.putIfAbsent(
+        n,
+        () => 'remove the placeholder and write the complete file',
+      );
+    }
+
+    final blocks = byBlock.keys.toList()..sort();
+    return [for (final block in blocks) 'Block $block: ${byBlock[block]}'];
   }
+
 
 
 

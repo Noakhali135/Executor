@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -93,7 +94,10 @@ class WorkspaceFs {
   static Future<String?> readString(String path) async {
     final bytes = await readBytes(path);
     if (bytes == null) return null;
-    return String.fromCharCodes(bytes);
+    // Must be UTF-8. String.fromCharCodes treats the bytes as UTF-16 code
+    // units, which turns "হ্যালো" into mojibake and truncates every character
+    // above U+00FF. A BOM is allowed: some editors write one.
+    return decodeText(bytes);
   }
 
   static Future<bool> writeBytes(String path, List<int> bytes) async {
@@ -109,7 +113,20 @@ class WorkspaceFs {
   }
 
   static Future<bool> writeString(String path, String content) =>
-      writeBytes(path, Uint8List.fromList(content.codeUnits));
+      // Must be UTF-8. content.codeUnits yields UTF-16 code units; storing
+      // those as bytes truncates anything outside Latin-1.
+      writeBytes(path, Uint8List.fromList(utf8.encode(content)));
+
+  /// Decodes UTF-8, tolerating a BOM and refusing to throw on bad input.
+  static String decodeText(List<int> bytes) {
+    if (bytes.length >= 3 &&
+        bytes[0] == 0xEF &&
+        bytes[1] == 0xBB &&
+        bytes[2] == 0xBF) {
+      return utf8.decode(bytes.sublist(3), allowMalformed: true);
+    }
+    return utf8.decode(bytes, allowMalformed: true);
+  }
 
   /// Copies one file, creating parents. Used by the pre-run backup.
   static Future<bool> copyFile(String from, String to) async {
