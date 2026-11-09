@@ -249,8 +249,32 @@ class FileExecutionService {
       actions: actions,
     );
 
-    emit('Paths are relative and inside project root', LogKind.ok);
-    emit('Every FILE_WRITE has a closing <<<END>>>', LogKind.ok);
+    // Both of these used to be printed as OK unconditionally, which read as a
+    // clean bill of health on a batch that had just been rejected. They now
+    // report what actually happened.
+    final pathProblems = plan.rejected.length;
+    if (pathProblems == 0) {
+      emit('Paths are relative and inside project root', LogKind.ok);
+    } else {
+      emit(
+        '${_plural(pathProblems, 'path', 'paths')} rejected'
+        ' (must be relative and inside the project root)',
+        LogKind.error,
+      );
+    }
+
+    final unclosed = report.errors
+        .where((e) => e.contains('missing <<<END>>>'))
+        .length;
+    if (unclosed == 0) {
+      emit('Every FILE_WRITE has a closing <<<END>>>', LogKind.ok);
+    } else {
+      emit(
+        '${_plural(unclosed, 'FILE_WRITE is', 'FILE_WRITEs are')} '
+        'missing <<<END>>>',
+        LogKind.error,
+      );
+    }
 
     // Worth stating for a delete: whether the target is really there. This is
     // the only place it is said, so the log does not repeat itself later.
