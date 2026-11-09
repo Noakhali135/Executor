@@ -1608,20 +1608,34 @@ class GitHubService {
     }
 
     if (scan.files.isEmpty) {
-      if (scan.looksLikePermissionProblem) {
-        // Folders visible, contents invisible: the folder was never granted.
+      // Distinguish "we could not read it" from "we read it and it is empty".
+      // Treating those the same is what produced a scary access error for a
+      // folder the user had just granted successfully.
+      if (scan.unreadableEntries > 0) {
         onLog(
-          '[NO ACCESS] ${scan.directoryCount} folder(s) are visible but their contents are not readable.',
+          '[NO ACCESS] ${scan.unreadableEntries} folder(s) inside the grant could not be read.',
           LogKind.error,
         );
+        for (final error in scan.errors) {
+          onLog('  $error', LogKind.error);
+        }
         onLog(
           '[HOW TO FIX] Open the workspace picker and choose "Pick a folder", then '
           'grant this folder. The grant is permanent and needs no permission.',
           LogKind.warn,
         );
+      } else if (scan.directoryCount <= 1) {
+        onLog('[EMPTY] This folder has no files in it at all.', LogKind.warn);
+      } else if (scan.skippedIgnored > 0) {
+        onLog(
+          '[EMPTY] Only build/VCS output was found (${scan.skippedIgnored} file(s)), '
+          'which is never pushed.',
+          LogKind.warn,
+        );
       } else {
         onLog(
-          '[EMPTY] No files found in $workingDir (and no build/VCS folders were skipped).',
+          '[EMPTY] No files found directly in the selected folder. If your project '
+          'is in a subfolder, pick that subfolder instead.',
           LogKind.warn,
         );
       }

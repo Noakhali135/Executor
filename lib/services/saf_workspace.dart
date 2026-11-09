@@ -154,20 +154,69 @@ class SafWorkspace {
     String path, {
     int maxFiles = 5000,
   }) async {
+    final result = await listTree(path, maxFiles: maxFiles);
+    return result.files;
+  }
+
+  /// Lists a tree and keeps the diagnosis, not just the files.
+  ///
+  /// The previous version only ever returned the file list, so "the walk could
+  /// not open the folder" and "the folder really is empty" looked identical -
+  /// which is how a perfectly good project got reported as having no readable
+  /// files. [unreadable] and [errors] now say which one it was.
+  static Future<SafTreeListing> listTree(
+    String path, {
+    int maxFiles = 5000,
+  }) async {
     try {
-      final rows = await _channel.invokeListMethod<Map<Object?, Object?>>(
+      final raw = await _channel.invokeMapMethod<Object?, Object?>(
         'listSafFiles',
         {'path': path, 'maxFiles': maxFiles},
       );
-      return (rows ?? const [])
-          .map((row) => <String, Object?>{
-                'path': row['path'] as String?,
-                'size': (row['size'] as num?)?.toInt() ?? 0,
-              })
-          .where((row) => row['path'] != null)
-          .toList();
-    } catch (_) {
-      return const [];
+      if (raw == null) {
+        return const SafTreeListing(
+          files: [],
+          errors: ['The folder listing returned nothing. Pick the folder again.'],
+          unreadable: 1,
+        );
+      }
+
+      // Older native builds returned a bare list; accept both shapes so a
+      // stale APK cannot break the scan.
+      final rows = raw['files'];
+      final list = rows is List ? rows : const [];
+      final files = <Map<String, Object?>>[];
+      for (final row in list) {
+        if (row is! Map) continue;
+        final filePath = row['path'] as String?;
+        if (filePath == null) continue;
+        files.add({
+          'path': filePath,
+          'size': (row['size'] as num?)?.toInt() ?? -1,
+        });
+      }
+
+      final errors = <String>[];
+      final rawErrors = raw['errors'];
+      if (rawErrors is List) {
+        for (final error in rawErrors) {
+          if (error is String && error.isNotEmpty) errors.add(error);
+        }
+      }
+
+      return SafTreeListing(
+        files: files,
+        directories: (raw['dirs'] as num?)?.toInt() ?? 0,
+        unreadable: (raw['unreadable'] as num?)?.toInt() ?? 0,
+        errors: errors,
+        root: path,
+      );
+    } catch (e) {
+      return SafTreeListing(
+        files: const [],
+        unreadable: 1,
+        errors: ['Could not list the folder: $e'],
+      );
     }
   }
 
@@ -192,6 +241,13 @@ class SafWorkspace {
   }
 
   /// Name/isDirectory/size for one virtual path, or null when unreadable.
+  /// Reads a value that may arrive as `bool` or as a legacy `0`/`1`.
+  static bool _asBool(Object? value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    return false;
+  }
+
   static Future<Map<String, Object?>?> describe(String path) async {
     try {
       final map = await _channel.invokeMethod<Map<Object?, Object?>>(
@@ -201,8 +257,10 @@ class SafWorkspace {
       if (map == null) return null;
       return <String, Object?>{
         'name': map['name'] as String? ?? p.basename(path),
-        'isDirectory': (map['isDirectory'] as num?)?.toInt() == 1,
-        'size': (map['size'] as num?)?.toInt() ?? 0,
+        // Native sends a boolean. Accepting only a number here meant this was
+        // always false, so a real folder looked like a file.
+        'isDirectory': _asBool(map['isDirectory']),
+        'size': (map['size'] as num?)?.toInt() ?? -1,
       };
     } catch (_) {
       return null;
@@ -231,7 +289,7 @@ class SafWorkspace {
           .map((row) => <String, Object?>{
                 'path': row['path'] as String?,
                 'name': row['name'] as String?,
-                'isDirectory': (row['isDirectory'] as num?)?.toInt() == 1,
+                'isDirectory': _asBool(row['isDirectory']),
                 'size': (row['size'] as num?)?.toInt() ?? 0,
               })
           .where((row) => row['path'] != null)
@@ -298,4 +356,28 @@ Future<String> workspaceLabel(String path, {List<SafTree>? trees}) async {
   }
   // No matching grant (revoked, or the platform could not decode it).
   return 'Granted folder (unavailable)';
+}
+
+/// Result of walking a granted SAF tree.
+class SafTreeListing {
+  final List<Map<String, Object?>> files;
+  final int directories;
+
+  /// Folders that could not be opened at all.
+  final int unreadable;
+
+  /// Human-readable reasons, already stripped of the virtual path prefix.
+  final List<String> errors;
+
+  /// The exact path that was asked for, so callers can tell "this folder is
+  /// empty" apart from "this folder's project is entirely in subfolders".
+  final String root;
+
+  const SafTreeListing({
+    required this.files,
+    this.directories = 0,
+    this.unreadable = 0,
+    this.errors = const [],
+    this.root = '',
+  });
 }

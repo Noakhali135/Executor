@@ -101,12 +101,37 @@ class _RunnerScreenState extends State<RunnerScreen> {
 
   /// Checks the selected workspace as soon as it changes, so a scoped-storage
   /// problem is visible immediately instead of at push time.
+  ///
+  /// A folder you just picked is not automatically suspicious, so a healthy
+  /// scan says so in one line instead of printing nothing and leaving you to
+  /// wonder whether the check ran at all.
   Future<void> _diagnoseWorkingDir(String dir) async {
     if (dir.trim().isEmpty) return;
-    final problems = await WorkspaceProbe.diagnose(dir);
-    if (!mounted || problems.isEmpty) return;
 
-    _addLog('Workspace check: ${await workspaceLabel(dir)}', LogKind.info);
+    final listing = await WorkspaceProbe.scanForPush(dir, maxFiles: 5000);
+    if (!mounted) return;
+
+    if (listing.unreadableEntries > 0) {
+      for (final problem in listing.errors.isEmpty
+          ? ['Some folders inside it could not be opened.']
+          : listing.errors) {
+        _addLog('[WORKSPACE] $problem', LogKind.error);
+      }
+      return;
+    }
+
+    if (listing.files.isNotEmpty) {
+      _addLog(
+        'Workspace check: ${listing.files.length} file(s) in '
+        '${listing.directoryCount} folder(s), readable',
+        LogKind.ok,
+      );
+      return;
+    }
+
+    // Nothing to push, but say why - and only say it once the reason is known.
+    final problems = await WorkspaceProbe.diagnose(dir);
+    if (!mounted) return;
     for (final problem in problems) {
       _addLog('[WORKSPACE] $problem', LogKind.warn);
     }

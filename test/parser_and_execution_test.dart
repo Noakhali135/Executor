@@ -557,12 +557,36 @@ void main() {
       expect(scan.looksLikePermissionProblem, isTrue);
     });
 
-    test('diagnose() explains the scoped-storage case', () async {
+    test('diagnose() points at SAF when folders hide their files', () async {
       await Directory(p.join(tempRoot.path, 'android')).create();
       final problems = await WorkspaceProbe.diagnose(tempRoot.path);
 
       expect(problems, isNotEmpty);
-      expect(problems.join(' ').toLowerCase(), contains('all files access'));
+      // The remedy is the folder picker, not a permission that no longer exists.
+      expect(problems.join(' ').toLowerCase(), contains('pick'));
+      expect(problems.join(' ').toLowerCase(), isNot(contains('all files access')));
+    });
+
+    test('an empty folder is described as empty, not as unreadable', () async {
+      final problems = await WorkspaceProbe.diagnose(tempRoot.path);
+      expect(problems.single, contains('empty'));
+      expect(problems.join(' ').toLowerCase(), isNot(contains('readable')));
+    });
+
+    test('a project entirely in a subfolder says to pick the subfolder', () async {
+      await Directory(p.join(tempRoot.path, 'myapp')).create();
+      await File(p.join(tempRoot.path, 'myapp', 'main.dart')).writeAsString('x');
+
+      final problems = await WorkspaceProbe.diagnose(tempRoot.path);
+      expect(problems.single, contains('subfolder'));
+    });
+
+    test('a healthy workspace produces no problems', () async {
+      await File(p.join(tempRoot.path, 'main.dart')).writeAsString('x');
+      final problems = await WorkspaceProbe.diagnose(tempRoot.path);
+      // A plain path that dart:io can read still gets the SAF reminder; what
+      // matters is that it is not reported as broken.
+      expect(problems.join(' ').toLowerCase(), isNot(contains('no readable files')));
     });
 
     test('diagnose() flags a missing directory', () async {

@@ -65,6 +65,10 @@ class WorkspaceScan {
   /// True when the files came from a granted SAF tree.
   final bool viaSaf;
 
+  /// The path that was scanned, so "this folder is empty" can be told apart
+  /// from "everything lives in a subfolder".
+  final String root;
+
   const WorkspaceScan({
     required this.files,
     required this.directoryCount,
@@ -72,6 +76,7 @@ class WorkspaceScan {
     required this.skippedIgnored,
     required this.errors,
     this.viaSaf = false,
+    this.root = '',
   });
 
   static const WorkspaceScan empty = WorkspaceScan(
@@ -219,11 +224,11 @@ class WorkspaceProbe {
       }
     }
 
-    final rows = await SafWorkspace.listFiles(root, maxFiles: maxFiles);
+    final listing = await SafWorkspace.listTree(root, maxFiles: maxFiles);
     final files = <WorkspaceFile>[];
     var skippedIgnored = 0;
 
-    for (final row in rows) {
+    for (final row in listing.files) {
       final path = row['path'] as String?;
       if (path == null) continue;
       if (isIgnored(path)) {
@@ -237,11 +242,15 @@ class WorkspaceProbe {
 
     return WorkspaceScan(
       files: files,
-      directoryCount: 1,
-      unreadableEntries: 0,
+      // The walk counts every folder it opened, including the root. Reporting
+      // a hard-coded 1 hid the difference between an empty folder and a
+      // folder whose files were never reached.
+      directoryCount: listing.directories,
+      unreadableEntries: listing.unreadable,
       skippedIgnored: skippedIgnored,
-      errors: const [],
+      errors: listing.errors,
       viaSaf: true,
+      root: root,
     );
   }
 
@@ -273,8 +282,48 @@ class WorkspaceProbe {
 
     if (SafWorkspace.isSafPath(path)) {
       final scan = await scanSaf(path, maxFiles: 200);
-      if (scan.files.isEmpty) {
-        problems.add('The granted folder contains no readable files.');
+
+      // Only ever complain about something we actually know. A zero file count
+      // on its own proves nothing: the folder may be empty, everything in it
+      // may be an ignored build directory, or the walk may have been cut short.
+      if (scan.unreadableEntries > 0) {
+        problems.addAll(scan.errors.isEmpty
+            ? ['Some folders could not be opened inside the granted folder.']
+            : scan.errors);
+        return problems;
+      }
+
+      if (scan.files.isNotEmpty) return problems;
+
+      // Did the walk find the folder you picked, or a subfolder of it?
+      final everyFileIsBelowRoot = scan.files.every((file) {
+        final parent = file.path.contains('/')
+            ? file.path.substring(0, file.path.lastIndexOf('/'))
+            : file.path;
+        return parent != scan.root;
+      });
+
+      if (scan.files.isEmpty && scan.directoryCount <= 1) {
+        // The root was read successfully and held nothing. A statement about
+        // the folder, not a fault to fix.
+        problems.add(
+          'This folder is empty. Pick the folder that contains your project.',
+        );
+      } else if (everyFileIsBelowRoot) {
+        problems.add(
+          'The project folder itself has no files - everything is inside a '
+          'subfolder. Pick that subfolder so paths come out right.',
+        );
+      } else if (scan.skippedIgnored > 0) {
+        problems.add(
+          'Only build/VCS output was found here (${scan.skippedIgnored} file(s)). '
+          'That is never pushed, so there is nothing to send.',
+        );
+      } else {
+        problems.add(
+          'No files were found in this folder. If your project is in a subfolder, '
+          'pick that subfolder instead.',
+        );
       }
       return problems;
     }

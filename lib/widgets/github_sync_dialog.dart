@@ -442,26 +442,34 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     final probe = await WorkspaceProbe.scanForPush(widget.workingDir, maxFiles: 200);
     if (probe.files.isEmpty) {
       final problems = await WorkspaceProbe.diagnose(widget.workingDir);
-      for (final problem in problems) {
-        widget.onLog('[WORKSPACE] $problem', LogKind.error);
-      }
-      if (probe.looksLikePermissionProblem) {
+
+      // An unreadable folder is a real failure. An empty one is not: it is a
+      // reading of what is there, so it must not be dressed up as an error.
+      if (probe.unreadableEntries > 0) {
+        for (final problem in problems) {
+          widget.onLog('[WORKSPACE] $problem', LogKind.error);
+        }
         widget.onLog(
           '[HOW TO FIX] Open the workspace picker and choose "Pick a folder", then '
           'grant this folder to DevRunner. The grant is permanent.',
           LogKind.warn,
         );
+      } else {
+        for (final problem in problems) {
+          widget.onLog('[NOTHING TO PUSH] $problem', LogKind.warn);
+        }
       }
+
       if (mounted) {
         setState(() => _isPushing = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              probe.looksLikePermissionProblem
-                  ? 'This folder is not granted to DevRunner. Pick it again.'
-                  : 'This folder contains no files to push.',
-            ),
-            backgroundColor: const Color(0xFFDC2626),
+            content: Text(problems.isEmpty
+                ? 'This folder contains no files to push.'
+                : problems.first),
+            backgroundColor: probe.unreadableEntries > 0
+                ? const Color(0xFFDC2626)
+                : const Color(0xFFB45309),
             behavior: SnackBarBehavior.floating,
             duration: const Duration(seconds: 5),
           ),

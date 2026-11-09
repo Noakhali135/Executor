@@ -276,27 +276,63 @@ class SafWorkspace(private val activity: Activity) {
         virtualPath: String,
         maxFiles: Int,
         onProgress: (scanned: Int, dirs: Int) -> Unit = { _, _ -> }
-    ): List<Map<String, Any>> {
-        val out = ArrayList<Map<String, Any>>()
-        val root = resolve(virtualPath) ?: return out
+    ): Map<String, Any> {
+        val files = ArrayList<Map<String, Any>>()
+        val errors = ArrayList<String>()
         var dirs = 0
+        var unreadable = 0
+
+        // A null root means the grant is gone or the folder was moved. That is
+        // not "this folder is empty", so say which one it is.
+        val root = resolve(virtualPath)
+        if (root == null) {
+            return mapOf(
+                "files" to files,
+                "dirs" to 0,
+                "unreadable" to 1,
+                "errors" to listOf(
+                    "The folder could not be opened. Its grant may have been " +
+                        "revoked - pick it again with \"Pick a folder\"."
+                )
+            )
+        }
+        if (!root.isDirectory) {
+            return mapOf(
+                "files" to files,
+                "dirs" to 0,
+                "unreadable" to 1,
+                "errors" to listOf("The selected item is a file, not a folder.")
+            )
+        }
 
         fun walk(dir: DocumentFile, prefix: String, depth: Int) {
-            if (out.size >= maxFiles || depth > 32 || cancelled) return
+            if (files.size >= maxFiles || depth > 32 || cancelled) return
             dirs++
             // One callback per directory, not per file: cheap to marshal.
-            if (dirs % 25 == 0) onProgress(out.size, dirs)
+            if (dirs % 25 == 0) onProgress(files.size, dirs)
 
             val children = try {
                 dir.listFiles()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                // Swallowing this used to turn a permission problem into
+                // "the folder contains no readable files", which sent the user
+                // looking for a problem that was not there.
+                unreadable++
+                if (errors.size < 5) {
+                    val where = if (prefix.isEmpty()) virtualPath else prefix
+                    errors.add("Could not read ${where.removePrefix("$VIRTUAL_ROOT/")}: " +
+                        (e.message ?: e.javaClass.simpleName))
+                }
                 return
             }
+
             for (child in children) {
-                if (out.size >= maxFiles || cancelled) return
+                if (files.size >= maxFiles || cancelled) return
                 val name = child.name ?: continue
                 val path = if (prefix.isEmpty()) "${virtualPath}/${name}" else "$prefix/${name}"
                 if (child.isDirectory) {
+                    // Checked before recursing, so node_modules/build cost one
+                    // entry here instead of thousands of provider queries.
                     if (name in IGNORED_DIRS) continue
                     remember(path, child)
                     walk(child, path, depth + 1)
@@ -305,7 +341,7 @@ class SafWorkspace(private val activity: Activity) {
                     // every later lookup of this path. Report "unknown" size and
                     // keep the handle the walk already has.
                     remember(path, child)
-                    out.add(
+                    files.add(
                         mapOf<String, Any>(
                             "path" to path,
                             "size" to -1,
@@ -316,9 +352,14 @@ class SafWorkspace(private val activity: Activity) {
             }
         }
 
-        if (root.isDirectory) walk(root, "", 0)
-        onProgress(out.size, dirs)
-        return out
+        walk(root, "", 0)
+        onProgress(files.size, dirs)
+        return mapOf(
+            "files" to files,
+            "dirs" to dirs,
+            "unreadable" to unreadable,
+            "errors" to errors
+        )
     }
 
     /**
