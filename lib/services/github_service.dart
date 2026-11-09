@@ -795,7 +795,7 @@ class GitHubService {
     required String commitMessage,
     required String workingDir,
     Set<String>? specificPaths,
-    required Function(String message, LogLevel level) onLog,
+    required Function(String message, LogKind level) onLog,
     ReauthPrompt? onReauth,
   }) async {
     var activeToken = sanitizeToken(token);
@@ -812,25 +812,25 @@ class GitHubService {
       if (access.failure == null) {
         onLog(
           'Repository access verified: ${access.canPush ? 'read + write' : 'read only'}.',
-          LogLevel.success,
+          LogKind.ok,
         );
         break;
       }
 
-      onLog('[AUTH] ${access.failure!.message}', LogLevel.error);
-      onLog('[HOW TO FIX] ${access.failure!.remedy}', LogLevel.warning);
+      onLog('[AUTH] ${access.failure!.message}', LogKind.error);
+      onLog('[HOW TO FIX] ${access.failure!.remedy}', LogKind.warn);
 
       final replacement = onReauth == null ? null : await onReauth(access.failure!);
       if (replacement == null || replacement.trim().isEmpty) {
-        onLog('Push cancelled. No files were uploaded.', LogLevel.warning);
+        onLog('Push cancelled. No files were uploaded.', LogKind.warn);
         return;
       }
 
       activeToken = sanitizeToken(replacement);
-      onLog('Retrying with the new token...', LogLevel.info);
+      onLog('Retrying with the new token...', LogKind.info);
 
       if (authAttempt == 1) {
-        onLog('Push cancelled: the replacement token was rejected as well.', LogLevel.error);
+        onLog('Push cancelled: the replacement token was rejected as well.', LogKind.error);
         return;
       }
     }
@@ -849,9 +849,9 @@ class GitHubService {
         );
         return;
       } on GitHubAuthException catch (e) {
-        onLog('[AUTH] ${e.message}', LogLevel.error);
-        onLog('[HOW TO FIX] ${e.remedy}', LogLevel.warning);
-        onLog('Push aborted. No commit was created.', LogLevel.warning);
+        onLog('[AUTH] ${e.message}', LogKind.error);
+        onLog('[HOW TO FIX] ${e.remedy}', LogKind.warn);
+        onLog('Push aborted. No commit was created.', LogKind.warn);
         PushProgressReporter.finish(
           PushPhase.failed,
           e.message,
@@ -860,7 +860,7 @@ class GitHubService {
       } on PushCancelled {
         onLog(
           '[CANCELLED] Stopped on request. No commit was created; the branch is unchanged.',
-          LogLevel.warning,
+          LogKind.warn,
         );
         PushProgressReporter.finish(
           PushPhase.cancelled,
@@ -869,10 +869,10 @@ class GitHubService {
         return;
       } on _PushConflict catch (e) {
         if (attempt == 0) {
-          onLog('${e.message} Re-syncing with the remote and retrying once...', LogLevel.warning);
+          onLog('${e.message} Re-syncing with the remote and retrying once...', LogKind.warn);
           continue;
         }
-        onLog('Push aborted: ${e.message}', LogLevel.error);
+        onLog('Push aborted: ${e.message}', LogKind.error);
         PushProgressReporter.finish(PushPhase.failed, e.message);
         return;
       }
@@ -887,7 +887,7 @@ class GitHubService {
     required String commitMessage,
     required String workingDir,
     Set<String>? specificPaths,
-    required Function(String message, LogLevel level) onLog,
+    required Function(String message, LogKind level) onLog,
   }) async {
     // `dart:io` defaults to 6 idle sockets per host, so ten concurrent uploads
     // meant three of them waited for a free connection and paid for a fresh TLS
@@ -898,7 +898,7 @@ class GitHubService {
     final stopwatch = Stopwatch()..start();
 
     try {
-      onLog('Connecting to GitHub API as @$owner...', LogLevel.info);
+      onLog('Connecting to GitHub API as @$owner...', LogKind.info);
 
       final scanTimer = Stopwatch()..start();
       final files = await _collectFiles(
@@ -908,14 +908,14 @@ class GitHubService {
       );
       scanTimer.stop();
       if (files.isEmpty) {
-        onLog('No files found to push to GitHub.', LogLevel.warning);
+        onLog('No files found to push to GitHub.', LogKind.warn);
         return;
       }
 
       onLog(
         'Scanned ${files.length} file(s) in '
         '${(scanTimer.elapsedMilliseconds / 1000).toStringAsFixed(1)}s.',
-        LogLevel.info,
+        LogKind.info,
       );
 
       // Resolve the target branch head (and the repo default as a fallback).
@@ -936,7 +936,7 @@ class GitHubService {
           repoName: repoName,
         );
         if (defaultBranch != branch) {
-          onLog('Branch "$branch" not found; branching from "$defaultBranch".', LogLevel.info);
+          onLog('Branch "$branch" not found; branching from "$defaultBranch".', LogKind.info);
           parentCommitSha = await _getBranchHead(
             client: client,
             token: token,
@@ -1027,7 +1027,7 @@ class GitHubService {
         if (length > maxBlobBytes) {
           onLog(
             'Skipped ${file.name} (${_formatBytes(length)}) — exceeds the ${_formatBytes(maxBlobBytes)} per-file limit.',
-            LogLevel.warning,
+            LogKind.warn,
           );
           skippedTooLarge++;
           continue;
@@ -1041,7 +1041,7 @@ class GitHubService {
         onLog(
           'Resolved $sizesResolved file size(s) on demand '
           '(the rest came from the scan or the remote tree).',
-          LogLevel.info,
+          LogKind.info,
         );
       }
 
@@ -1069,7 +1069,7 @@ class GitHubService {
       onLog(
         '${toUpload.length} new file(s) need no hashing; '
         'comparing ${toCompare.length} that already exist on GitHub.',
-        LogLevel.info,
+        LogKind.info,
       );
 
       PushProgressReporter.report(
@@ -1093,7 +1093,7 @@ class GitHubService {
         onLog(
           '[WARN] Could not compare against GitHub; those file(s) will be '
           'uploaded again.',
-          LogLevel.warning,
+          LogKind.warn,
         );
       }
 
@@ -1128,7 +1128,7 @@ class GitHubService {
         }
 
         if (localSha == null && !SafWorkspace.isSafPath(file.path)) {
-          onLog('Could not hash ${file.name}; uploading it to be safe.', LogLevel.warning);
+          onLog('Could not hash ${file.name}; uploading it to be safe.', LogKind.warn);
         }
 
         if (cancelRequested) throw const PushCancelled();
@@ -1142,7 +1142,7 @@ class GitHubService {
             message: 'Compared $i of ${toCompare.length} file(s) with GitHub',
           );
           if (i > 0 && i % 500 == 0) {
-            onLog('Hashed $i/${toCompare.length} file(s)...', LogLevel.info);
+            onLog('Hashed $i/${toCompare.length} file(s)...', LogKind.info);
           }
         }
       }
@@ -1152,7 +1152,7 @@ class GitHubService {
       }
 
       if (remoteBefore == 0 && candidates.isNotEmpty) {
-        onLog('Remote repository is empty; this will be the first commit.', LogLevel.info);
+        onLog('Remote repository is empty; this will be the first commit.', LogKind.info);
       }
 
       final summaryDiff = [
@@ -1165,19 +1165,19 @@ class GitHubService {
       onLog(
         'Compared in ${(stopwatch.elapsedMilliseconds / 1000).toStringAsFixed(1)}s '
         '(scan alone: ${(scanTimer.elapsedMilliseconds / 1000).toStringAsFixed(1)}s).',
-        LogLevel.info,
+        LogKind.info,
       );
-      onLog('Diff analysis: $summaryDiff', LogLevel.info);
+      onLog('Diff analysis: $summaryDiff', LogKind.info);
       onLog(
         'Payload: ${filesToUpload.length} file(s) to upload '
         '(${_formatBytes(totalUploadBytes)}) [Total workspace: ${_formatBytes(totalScannedBytes)}]',
-        LogLevel.info,
+        LogKind.info,
       );
 
       if (filesToUpload.isEmpty) {
         onLog(
           '[SUCCESS] Everything is up-to-date! All $unchangedCount file(s) already match GitHub.',
-          LogLevel.success,
+          LogKind.ok,
         );
         PushProgressReporter.finish(
           PushPhase.done,
@@ -1189,7 +1189,7 @@ class GitHubService {
       onLog(
         'Uploading ${filesToUpload.length} file(s) '
         '(${_formatBytes(totalUploadBytes)}) with $uploadConcurrency parallel workers...',
-        LogLevel.info,
+        LogKind.info,
       );
       int uploadedBytesCounter = 0;
       final failedFiles = <String>[];
@@ -1273,12 +1273,12 @@ class GitHubService {
               // Record the failure; the commit is aborted below rather than
               // producing a "successful" push with files silently missing.
               failedFiles.add(item.relPath);
-              onLog('Blob upload failed for ${item.relPath}: ${_extractMessage(blobRes)}', LogLevel.error);
+              onLog('Blob upload failed for ${item.relPath}: ${_extractMessage(blobRes)}', LogKind.error);
             }
           } catch (e) {
             if (authFailure == null) {
               failedFiles.add(item.relPath);
-              onLog('Blob upload error for ${item.relPath}: $e', LogLevel.error);
+              onLog('Blob upload error for ${item.relPath}: $e', LogKind.error);
             }
           } finally {
             if (reserved > 0) budget.release(reserved);
@@ -1297,7 +1297,7 @@ class GitHubService {
               onLog(
                 'Uploaded $processedCounter/${filesToUpload.length} files '
                 '(${_formatBytes(uploadedBytesCounter)} / ${_formatBytes(totalUploadBytes)})',
-                LogLevel.info,
+                LogKind.info,
               );
             }
           }
@@ -1312,7 +1312,7 @@ class GitHubService {
         // Abort before the commit: nothing is written to the branch.
         onLog(
           '[ABORTED] Authentication failed while uploading. Nothing was committed; the branch is unchanged.',
-          LogLevel.error,
+          LogKind.error,
         );
         throw authFailure!;
       }
@@ -1321,7 +1321,7 @@ class GitHubService {
         onLog(
           '[ABORTED] ${failedFiles.length} file(s) could not be uploaded. Nothing was committed; '
           'the branch is unchanged. First failures: ${failedFiles.take(5).join(', ')}',
-          LogLevel.error,
+          LogKind.error,
         );
         PushProgressReporter.finish(
           PushPhase.failed,
@@ -1334,7 +1334,7 @@ class GitHubService {
         PushPhase.committing,
         message: 'All files uploaded. Creating the commit...',
       );
-      onLog('Generating Git Tree with ${treeNodes.length} objects...', LogLevel.info);
+      onLog('Generating Git Tree with ${treeNodes.length} objects...', LogKind.info);
       // Unchanged files (added during the compare pass) and uploaded files
       // (added by the workers) can arrive in any order; GitHub keys tree
       // entries by path, so sort for a stable, reviewable payload.
@@ -1352,7 +1352,7 @@ class GitHubService {
         throw _authFailureFor(treeRes, token: token, action: 'create the git tree');
       }
       if (treeRes.statusCode != 201) {
-        onLog('Failed to create Git Tree: ${_extractMessage(treeRes)}', LogLevel.error);
+        onLog('Failed to create Git Tree: ${_extractMessage(treeRes)}', LogKind.error);
         PushProgressReporter.finish(
           PushPhase.failed,
           'GitHub rejected the tree. Nothing was committed.',
@@ -1361,7 +1361,7 @@ class GitHubService {
       }
       final newTreeSha = jsonDecode(treeRes.body)['sha'];
 
-      onLog('Creating commit "$commitMessage"...', LogLevel.info);
+      onLog('Creating commit "$commitMessage"...', LogKind.info);
       final commitPayload = <String, dynamic>{
         'message': commitMessage,
         'tree': newTreeSha,
@@ -1378,7 +1378,7 @@ class GitHubService {
         throw _authFailureFor(commitRes, token: token, action: 'create the commit');
       }
       if (commitRes.statusCode != 201) {
-        onLog('Failed to create commit: ${_extractMessage(commitRes)}', LogLevel.error);
+        onLog('Failed to create commit: ${_extractMessage(commitRes)}', LogKind.error);
         PushProgressReporter.finish(
           PushPhase.failed,
           'GitHub rejected the commit. The branch is unchanged.',
@@ -1413,13 +1413,13 @@ class GitHubService {
         ).timeout(_requestTimeout);
 
         if (updateRefRes.statusCode == 200) {
-          onLog('[SUCCESS] Pushed commit $shortSha to branch "$branch"', LogLevel.success);
+          onLog('[SUCCESS] Pushed commit $shortSha to branch "$branch"', LogKind.ok);
           onLog(
             '[PUSH STATS] $newCount new, $modifiedCount modified, $unchangedCount cached | '
             '${_formatBytes(totalUploadBytes)} uploaded in ${elapsedSeconds.toStringAsFixed(1)}s ($speedText)',
-            LogLevel.success,
+            LogKind.ok,
           );
-          onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogLevel.success);
+          onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogKind.ok);
           PushProgressReporter.finish(
             PushPhase.done,
             'Pushed $shortSha: $newCount new, $modifiedCount modified.',
@@ -1427,7 +1427,7 @@ class GitHubService {
         } else if (updateRefRes.statusCode == 409 || updateRefRes.statusCode == 422) {
           throw _PushConflict('Branch "$branch" was updated remotely while pushing.');
         } else {
-          onLog('Failed to update branch reference: ${_extractMessage(updateRefRes)}', LogLevel.error);
+          onLog('Failed to update branch reference: ${_extractMessage(updateRefRes)}', LogKind.error);
           PushProgressReporter.finish(
             PushPhase.failed,
             'Could not move the branch. Nothing was committed.',
@@ -1441,19 +1441,19 @@ class GitHubService {
         ).timeout(_requestTimeout);
 
         if (createRefRes.statusCode == 201) {
-          onLog('[SUCCESS] Created new branch "$branch" with commit $shortSha', LogLevel.success);
+          onLog('[SUCCESS] Created new branch "$branch" with commit $shortSha', LogKind.ok);
           onLog(
             '[PUSH STATS] $newCount new, $modifiedCount modified, $unchangedCount cached | '
             '${_formatBytes(totalUploadBytes)} uploaded in ${elapsedSeconds.toStringAsFixed(1)}s ($speedText)',
-            LogLevel.success,
+            LogKind.ok,
           );
-          onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogLevel.success);
+          onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogKind.ok);
           PushProgressReporter.finish(
             PushPhase.done,
             'Created branch "$branch" at $shortSha.',
           );
         } else {
-          onLog('Failed to create branch reference: ${_extractMessage(createRefRes)}', LogLevel.error);
+          onLog('Failed to create branch reference: ${_extractMessage(createRefRes)}', LogKind.error);
           PushProgressReporter.finish(
             PushPhase.failed,
             'Could not create the branch. Nothing was committed.',
@@ -1471,15 +1471,15 @@ class GitHubService {
       // prompt are lost to the generic handler below.
       rethrow;
     } on TimeoutException {
-      onLog('Request timed out. The network is slow or GitHub is unreachable.', LogLevel.error);
+      onLog('Request timed out. The network is slow or GitHub is unreachable.', LogKind.error);
       PushProgressReporter.finish(PushPhase.failed, 'Network timeout. The branch is unchanged.');
     } on SocketException {
-      onLog('Network error: unable to reach GitHub. Check the device connection.', LogLevel.error);
+      onLog('Network error: unable to reach GitHub. Check the device connection.', LogKind.error);
       PushProgressReporter.finish(PushPhase.failed, 'Network error. The branch is unchanged.');
     } on FormatException {
-      onLog('Unexpected response from GitHub (malformed JSON).', LogLevel.error);
+      onLog('Unexpected response from GitHub (malformed JSON).', LogKind.error);
     } catch (e) {
-      onLog('Unexpected error during GitHub push: $e', LogLevel.error);
+      onLog('Unexpected error during GitHub push: $e', LogKind.error);
       PushProgressReporter.finish(PushPhase.failed, 'Unexpected error. The branch is unchanged.');
     } finally {
       client.close();
@@ -1534,7 +1534,7 @@ class GitHubService {
   static Future<List<WorkspaceFile>> _collectFiles({
     required String workingDir,
     Set<String>? specificPaths,
-    required Function(String message, LogLevel level) onLog,
+    required Function(String message, LogKind level) onLog,
   }) async {
     PushProgressReporter.report(
       PushPhase.scanning,
@@ -1586,16 +1586,16 @@ class GitHubService {
     onLog(
       'Scanned ${scan.directoryCount} folder(s) and found ${scan.files.length} file(s)'
       '${scan.skippedIgnored > 0 ? ' (${scan.skippedIgnored} skipped: build/VCS output)' : ''}.',
-      LogLevel.info,
+      LogKind.info,
     );
 
     if (scan.unreadableEntries > 0) {
       onLog(
         '${scan.unreadableEntries} folder(s) could not be read and were skipped.',
-        LogLevel.warning,
+        LogKind.warn,
       );
       for (final error in scan.errors) {
-        onLog('  $error', LogLevel.warning);
+        onLog('  $error', LogKind.warn);
       }
     }
 
@@ -1603,7 +1603,7 @@ class GitHubService {
       onLog(
         '[ACCESS] Reading ${scan.files.length} file(s) through the granted folder '
         '(Storage Access Framework) — no storage permission required.',
-        LogLevel.success,
+        LogKind.ok,
       );
     }
 
@@ -1612,17 +1612,17 @@ class GitHubService {
         // Folders visible, contents invisible: the folder was never granted.
         onLog(
           '[NO ACCESS] ${scan.directoryCount} folder(s) are visible but their contents are not readable.',
-          LogLevel.error,
+          LogKind.error,
         );
         onLog(
           '[HOW TO FIX] Open the workspace picker and choose "Pick a folder", then '
           'grant this folder. The grant is permanent and needs no permission.',
-          LogLevel.warning,
+          LogKind.warn,
         );
       } else {
         onLog(
           '[EMPTY] No files found in $workingDir (and no build/VCS folders were skipped).',
-          LogLevel.warning,
+          LogKind.warn,
         );
       }
     }

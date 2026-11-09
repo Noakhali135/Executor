@@ -309,7 +309,7 @@ class SafWorkspace(private val activity: Activity) {
                         mapOf<String, Any>(
                             "path" to path,
                             "size" to -1,
-                            "isDirectory" to 0
+                            "isDirectory" to false
                         )
                     )
                 }
@@ -408,7 +408,7 @@ class SafWorkspace(private val activity: Activity) {
                 mapOf<String, Any>(
                     "path" to path,
                     "name" to name,
-                    "isDirectory" to if (child.isDirectory) 1 else 0,
+                    "isDirectory" to child.isDirectory,
                     "size" to child.length()
                 )
             )
@@ -497,9 +497,10 @@ class SafWorkspace(private val activity: Activity) {
     /** Convenience for Dart: is this virtual path granted and readable? */
     fun describe(virtualPath: String): Map<String, Any>? {
         val doc = resolve(virtualPath) ?: return null
-        return mapOf(
+        // Booleans, not 0/1: the Dart side reads these as `bool?`.
+        return mapOf<String, Any>(
             "name" to (doc.name ?: ""),
-            "isDirectory" to if (doc.isDirectory) 1 else 0,
+            "isDirectory" to doc.isDirectory,
             "size" to doc.length()
         )
     }

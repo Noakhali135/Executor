@@ -125,7 +125,49 @@ class PathGuard {
     return candidate;
   }
 
-  /// Converts a user supplied `[PATH]:` value into a safe relative path.
+  /// Validates a project-relative path from a `path="..."` block.
+  ///
+  /// Returns `null` when safe, otherwise the reason. Rejects, rather than
+  /// silently "fixes", anything that could reach outside the project:
+  ///
+  ///   * absolute paths (`/etc/passwd`, `C:\Windows`),
+  ///   * parent traversal (`../secrets.txt`, `a/../../b`),
+  ///   * drive letters / UNC roots / `~`,
+  ///   * NUL bytes and empty segments.
+  static String? validateRelativePath(String raw) {
+    final value = raw.trim();
+    if (value.isEmpty) return 'path is empty';
+    if (value.contains('\u0000')) return 'path contains a NUL byte';
+    if (value.length > 1024) return 'path is too long';
+
+    final normalized = value.replaceAll(r'\', '/');
+
+    // `~` is expanded by shells, and on Android it would silently point
+    // somewhere else entirely.
+    if (normalized == '~' || normalized.startsWith('~/')) {
+      return 'path must not start with "~"';
+    }
+
+    // Absolute paths: /x, //host/share, C:/x
+    if (normalized.startsWith('/')) {
+      return 'path must be relative, not absolute';
+    }
+    if (RegExp(r'^[A-Za-z]:/').hasMatch(normalized)) {
+      return 'path must not contain a drive letter';
+    }
+
+    final parts = normalized.split('/');
+    for (final part in parts) {
+      if (part.isEmpty) return 'path contains an empty segment';
+      if (part == '.') return 'path contains a "." segment';
+      if (part == '..') return 'path escapes the project root';
+    }
+
+    if (parts.length > 64) return 'path is nested too deeply';
+    return null;
+  }
+
+  /// Converts a user supplied `path="..."` value into a safe relative path.
   ///
   /// Leading/trailing separators are removed and any `.`/`..` segment is
   /// rejected rather than silently collapsed.

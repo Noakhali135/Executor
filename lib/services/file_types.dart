@@ -54,6 +54,9 @@ class FileTypes {
   }
 
   static String formatSize(int bytes) {
+    // The SAF tree walk reports -1: asking the provider for each file's length
+    // costs one query per file, so the size is only fetched when needed.
+    if (bytes < 0) return '—';
     if (bytes < 1024) return '${bytes}b';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).round()}kb';
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)}mb';

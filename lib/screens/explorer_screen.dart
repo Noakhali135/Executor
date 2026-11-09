@@ -161,8 +161,8 @@ class ExplorerScreenState extends State<ExplorerScreen> {
 
   /// Walks up to find the first folder that actually exposes files.
   ///
-  /// A project inside /storage/emulated/0/Download can show its folders but not
-  /// their contents without "All files access"; this tells the user that
+  /// A project inside /storage/emulated/0/Download is invisible to dart:io on
+  /// Android 11+; only a granted SAF tree can read it. This tells the user that
   /// directly instead of letting them wonder where the files went.
   Future<void> _diagnoseEmptyView() async {
     final problems = await WorkspaceProbe.diagnose(widget.workingDir);

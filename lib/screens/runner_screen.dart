@@ -106,9 +106,9 @@ class _RunnerScreenState extends State<RunnerScreen> {
     final problems = await WorkspaceProbe.diagnose(dir);
     if (!mounted || problems.isEmpty) return;
 
-    _addLog('Workspace check: ${await workspaceLabel(dir)}', LogLevel.info);
+    _addLog('Workspace check: ${await workspaceLabel(dir)}', LogKind.info);
     for (final problem in problems) {
-      _addLog('[WORKSPACE] $problem', LogLevel.warning);
+      _addLog('[WORKSPACE] $problem', LogKind.warn);
     }
   }
 
@@ -126,7 +126,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
     await StorageService.saveDirectory(selected);
     widget.onDirectoryChanged(selected);
 
-    _addLog('Workspace set to: ${await workspaceLabel(selected)}', LogLevel.info);
+    _addLog('Workspace set to: ${await workspaceLabel(selected)}', LogKind.info);
     await _diagnoseWorkingDir(selected);
   }
 
@@ -179,7 +179,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
     }
 
     final rawLogs = _terminalLogs
-        .map((l) => '[${l.formattedTime}] ${l.message}')
+        .map((l) => l.formatted)
         .join('\n');
     await Clipboard.setData(ClipboardData(text: rawLogs));
 
@@ -195,12 +195,63 @@ class _RunnerScreenState extends State<RunnerScreen> {
     }
   }
 
-  void _addLog(String msg, LogLevel level) {
+  void _addLog(String msg, LogKind kind) {
     if (!mounted) return;
     setState(() {
-      _terminalLogs.add(TerminalLog(message: msg, level: level));
+      _terminalLogs.add(TerminalLog(message: msg, kind: kind));
     });
+    _scrollTerminal();
+  }
+
+  Future<void> _executeScript() async {
+    final text = widget.codeController.text;
+    if (text.trim().isEmpty) {
+      _addLog('Command buffer is empty.', LogKind.warn);
+      return;
+    }
+
+    if (widget.workingDir.trim().isEmpty) {
+      _addLog('No workspace selected. Tap "Choose folder" first.', LogKind.error);
+      return;
+    }
+
+    setState(() => _isExecuting = true);
+
+    final parsed = CommandParserService.parse(text);
+
+    final result = await FileExecutionService.execute(
+      rootDir: widget.workingDir,
+      actions: parsed.actions,
+      report: ParseReport(
+        blockCount: parsed.blockCount,
+        charCount: parsed.charCount,
+        errors: parsed.errors,
+        warnings: parsed.warnings,
+        hints: _hintsFor(parsed),
+      ),
+      // The confirmation sheet is shown by the service, after validation, so a
+      // batch with a bad path can never reach a "are you sure?" prompt.
+      confirm: (plan) async {
+        setState(() => _isReviewing = true);
+        final approved = await _confirmExecution(plan);
+        if (mounted) setState(() => _isReviewing = false);
+        return approved;
+      },
+      onLog: (log) {
+        if (!mounted) return;
+        setState(() => _terminalLogs.add(log));
+        _scrollTerminal();
+      },
+    );
+
+    if (!mounted) return;
+    if (result.applied > 0) widget.onExecutionCompleted();
+    setState(() => _isExecuting = false);
+  }
+
+  void _scrollTerminal() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       if (_terminalScrollController.hasClients) {
         _terminalScrollController.animateTo(
           _terminalScrollController.position.maxScrollExtent,
@@ -211,90 +262,38 @@ class _RunnerScreenState extends State<RunnerScreen> {
     });
   }
 
-  Future<void> _executeScript() async {
-    final text = widget.codeController.text;
-    if (text.trim().isEmpty) {
-      _addLog('Warning: Command buffer is empty.', LogLevel.warning);
-      return;
-    }
+  /// Actionable per-block hints for the HINT block at the end of a failed run.
+  List<String> _hintsFor(ParseResult parsed) {
+    final hints = <String>[];
+    final blockOf = RegExp(r'Block (\d+)');
 
-    if (widget.workingDir.trim().isEmpty) {
-      _addLog('Error: No working directory selected. Tap Browse to select one.', LogLevel.error);
-      return;
-    }
-
-    _addLog('Parsing input commands...', LogLevel.info);
-    final parseResult = CommandParserService.parse(text);
-
-    for (final err in parseResult.errors) {
-      _addLog('[SYNTAX ERROR] $err', LogLevel.error);
-    }
-    for (final warning in parseResult.warnings) {
-      _addLog('[WARNING] $warning', LogLevel.warning);
-    }
-
-    if (!parseResult.hasActions) {
-      _addLog('No valid actions found to execute.', LogLevel.warning);
-      return;
-    }
-
-    // Resolve and validate every path before touching disk.
-    final plan = FileExecutionService.plan(
-      rootDir: widget.workingDir,
-      actions: parseResult.actions,
-    );
-    for (final blocked in plan.errors) {
-      _addLog('[BLOCKED] $blocked', LogLevel.error);
-    }
-
-    if (plan.runnable.isEmpty) {
-      _addLog('Every action was blocked. Nothing to execute.', LogLevel.error);
-      return;
-    }
-
-    if (plan.deleteCount > 0 || plan.rejected.isNotEmpty) {
-      setState(() => _isReviewing = true);
-      final approved = await _confirmExecution(plan);
-      if (!mounted) return;
-      setState(() => _isReviewing = false);
-      if (!approved) {
-        _addLog('Execution cancelled before any change was made.', LogLevel.warning);
-        return;
+    /// Turns "Block 2: <problem>" into "Block 2: <what to do about it>".
+    void add(String needle, String remedy, List<String> source) {
+      for (final line in source) {
+        if (!line.contains(needle)) continue;
+        final n = blockOf.firstMatch(line)?.group(1);
+        hints.add(n == null ? remedy : 'Block $n: $remedy');
       }
     }
 
-    if (!mounted) return;
-    setState(() {
-      _isExecuting = true;
-    });
+    const relative = 'use a relative path inside the project';
+    add('missing <<<END>>>', 'add <<<END>>> after the last line', parsed.errors);
+    add('escapes the project root', relative, parsed.errors);
+    add('must be relative', relative, parsed.errors);
+    add('drive letter', relative, parsed.errors);
+    add('contains a ".."', relative, parsed.errors);
+    add('unknown action',
+        'use FILE_WRITE, FILE_DELETE, FOLDER_CREATE or FOLDER_DELETE',
+        parsed.errors);
+    add('placeholder', 'remove the placeholder and write the complete file',
+        parsed.warnings);
+    add('missing path=', 'add path="..." to the opening tag', parsed.errors);
 
-    await FileExecutionService.executeBatch(
-      rootDir: widget.workingDir,
-      actions: parseResult.actions,
-      onLog: (log) {
-        if (!mounted) return;
-        setState(() {
-          _terminalLogs.add(log);
-        });
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          if (_terminalScrollController.hasClients) {
-            _terminalScrollController.animateTo(
-              _terminalScrollController.position.maxScrollExtent,
-              duration: const Duration(milliseconds: 180),
-              curve: Curves.easeOut,
-            );
-          }
-        });
-      },
-    );
-
-    if (!mounted) return;
-    widget.onExecutionCompleted();
-    setState(() {
-      _isExecuting = false;
-    });
+    // De-duplicate: several blocks often share the same remedy.
+    return hints.toSet().toList();
   }
+
+
 
   /// Pre-flight sheet shown whenever a batch deletes something or contains a
   /// blocked path. Nothing has been written at this point.
@@ -348,11 +347,11 @@ class _RunnerScreenState extends State<RunnerScreen> {
                   spacing: 6,
                   runSpacing: 6,
                   children: [
-                    _summaryChip('${plan.createCount} create', const Color(0xFF10B981)),
+                    _summaryChip('${plan.writeCount} write', const Color(0xFF10B981)),
+                    if (plan.createCount > 0)
+                      _summaryChip('${plan.createCount} folder', const Color(0xFF38BDF8)),
                     if (plan.deleteCount > 0)
                       _summaryChip('${plan.deleteCount} delete', const Color(0xFFF87171)),
-                    if (plan.skipCount > 0)
-                      _summaryChip('${plan.skipCount} skip', const Color(0xFF94A3B8)),
                     if (plan.rejected.isNotEmpty)
                       _summaryChip('${plan.rejected.length} blocked', const Color(0xFFFBBF24)),
                   ],
@@ -382,24 +381,21 @@ class _RunnerScreenState extends State<RunnerScreen> {
                       child: Row(
                         children: [
                           Icon(
-                            a.type == ActionType.createFile
-                                ? Icons.insert_drive_file_outlined
-                                : a.type == ActionType.createFolder
-                                    ? Icons.create_new_folder_outlined
-                                    : a.type == ActionType.skipBinary
-                                        ? Icons.skip_next_rounded
-                                        : Icons.delete_outline,
+                            switch (a.type) {
+                              ActionType.writeFile => Icons.insert_drive_file_outlined,
+                              ActionType.createFolder => Icons.create_new_folder_outlined,
+                              ActionType.deleteFile => Icons.delete_outline,
+                              ActionType.deleteFolder => Icons.folder_delete_outlined,
+                            },
                             size: 15,
                             color: isDelete
                                 ? const Color(0xFFF87171)
-                                : a.type == ActionType.skipBinary
-                                    ? const Color(0xFF64748B)
-                                    : const Color(0xFF34D399),
+                                : const Color(0xFF34D399),
                           ),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              '${a.displayName}  ${a.fullRelativePath}',
+                              '${a.displayName}  ${a.relativePath}',
                               style: TextStyle(
                                 color: isDelete ? const Color(0xFFFCA5A5) : const Color(0xFFCBD5E1),
                                 fontFamily: 'monospace',
@@ -970,25 +966,19 @@ class _RunnerScreenState extends State<RunnerScreen> {
                     itemCount: _terminalLogs.length,
                     itemBuilder: (ctx, i) {
                       final log = _terminalLogs[i];
-                      Color textColor;
-                      switch (log.level) {
-                        case LogLevel.success:
-                          textColor = const Color(0xFF34D399);
-                          break;
-                        case LogLevel.error:
-                          textColor = const Color(0xFFF87171);
-                          break;
-                        case LogLevel.warning:
-                          textColor = const Color(0xFFFBBF24);
-                          break;
-                        case LogLevel.info:
-                        default:
-                          textColor = const Color(0xFF94A3B8);
-                      }
+                      final textColor = switch (log.kind) {
+                        LogKind.ok => const Color(0xFF34D399),
+                        LogKind.done => const Color(0xFF34D399),
+                        LogKind.error => const Color(0xFFF87171),
+                        LogKind.fail => const Color(0xFFF87171),
+                        LogKind.warn => const Color(0xFFFBBF24),
+                        LogKind.hint => const Color(0xFF818CF8),
+                        LogKind.info => const Color(0xFF94A3B8),
+                      };
                       return Padding(
                         padding: const EdgeInsets.symmetric(vertical: 1.5),
                         child: Text(
-                          '[${log.formattedTime}] ${log.message}',
+                          log.formatted,
                           style: TextStyle(
                             color: textColor,
                             fontFamily: 'monospace',

@@ -8,7 +8,7 @@ import '../services/workspace_probe.dart';
 class GitHubSyncDialog extends StatefulWidget {
   final String workingDir;
   final Set<String>? selectedExplorerPaths;
-  final Function(String message, LogLevel level) onLog;
+  final Function(String message, LogKind level) onLog;
 
   const GitHubSyncDialog({
     super.key,
@@ -160,7 +160,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       widget.onLog(
         'Repository "$repo" selected — target branch "${_branchController.text}" '
         '(${_branches.length} branch(es)).',
-        LogLevel.info,
+        LogKind.info,
       );
     }
   }
@@ -282,7 +282,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
         if (kept != null && kept.isNotEmpty) _selectedRepo = kept;
       });
       if (result.error != null) {
-        widget.onLog('[REPOS] ${result.error!}', LogLevel.warning);
+        widget.onLog('[REPOS] ${result.error!}', LogKind.warn);
       }
       return;
     }
@@ -330,7 +330,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       widget.onLog(
         'Saved repository "$target" is not in this account any more; using '
         '"$resolved" instead. Pick another from the dropdown if that is wrong.',
-        LogLevel.warning,
+        LogKind.warn,
       );
     }
 
@@ -443,13 +443,13 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     if (probe.files.isEmpty) {
       final problems = await WorkspaceProbe.diagnose(widget.workingDir);
       for (final problem in problems) {
-        widget.onLog('[WORKSPACE] $problem', LogLevel.error);
+        widget.onLog('[WORKSPACE] $problem', LogKind.error);
       }
       if (probe.looksLikePermissionProblem) {
         widget.onLog(
           '[HOW TO FIX] Open the workspace picker and choose "Pick a folder", then '
           'grant this folder to DevRunner. The grant is permanent.',
-          LogLevel.warning,
+          LogKind.warn,
         );
       }
       if (mounted) {
@@ -478,7 +478,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     // State the full destination once, before anything is uploaded.
     widget.onLog(
       'Pushing to repository: $target (branch: $branch)',
-      LogLevel.info,
+      LogKind.info,
     );
     final commitMsg = _commitController.text.trim().isEmpty
         ? 'Update via DevRunner'
@@ -489,7 +489,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     });
 
     if (_isCreateNew) {
-      widget.onLog('Creating new repository "$target" on GitHub...', LogLevel.info);
+      widget.onLog('Creating new repository "$target" on GitHub...', LogKind.info);
       final created = await GitHubService.createRepository(
         token: _savedToken!,
         repoName: target,
@@ -500,9 +500,9 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       if (!created.success) {
         // Stop here rather than pretending and pushing into a repo that does
         // not exist. This is what used to produce a 404 several steps later.
-        widget.onLog('[CREATE FAILED] ${created.message}', LogLevel.error);
+        widget.onLog('[CREATE FAILED] ${created.message}', LogKind.error);
         if (created.remedy != null) {
-          widget.onLog('[HOW TO FIX] ${created.remedy!}', LogLevel.warning);
+          widget.onLog('[HOW TO FIX] ${created.remedy!}', LogKind.warn);
         }
         if (mounted) {
           setState(() => _isPushing = false);
@@ -518,7 +518,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
         return;
       }
 
-      widget.onLog('[SUCCESS] ${created.message}', LogLevel.success);
+      widget.onLog('[SUCCESS] ${created.message}', LogKind.ok);
       // Adopt the canonical name GitHub returned (it may differ in casing) and
       // treat the new repo as the selected one from now on.
       final canonical = created.repoName ?? target;
@@ -664,7 +664,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       widget.onLog(
         '[AUTH] The replacement token was rejected too: '
         '${verified.errorMessage ?? 'unknown error'}',
-        LogLevel.error,
+        LogKind.error,
       );
       return null;
     } finally {
@@ -933,7 +933,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
                   _dropdownEpoch++;
                 });
                 _announcedRepo = null;
-                widget.onLog('Target repository set to "$val".', LogLevel.info);
+                widget.onLog('Target repository set to "$val".', LogKind.info);
                 await GitHubService.saveRepo(val);
 
                 // Fetch the real branch list so the target branch is correct
@@ -991,7 +991,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
                 _branchController.text = val;
                 _branchPickedByUser = true;
               });
-              widget.onLog('Target branch set to "$val".', LogLevel.info);
+              widget.onLog('Target branch set to "$val".', LogKind.info);
             },
           )
         else

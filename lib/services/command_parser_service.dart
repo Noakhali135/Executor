@@ -1,65 +1,127 @@
 import '../models/command_action.dart';
 import 'path_guard.dart';
 
+/// Text that betrays a truncated AI response.
+///
+/// The whole point of this format is that the model must send the complete
+/// file. A block containing "rest of code unchanged" would otherwise overwrite
+/// a real file with a comment, which is silent data loss.
+class PlaceholderHit {
+  final int line;
+  final String text;
+
+  const PlaceholderHit(this.line, this.text);
+
+  @override
+  String toString() => 'line $line: "$text"';
+}
+
 class ParseResult {
   final List<CommandAction> actions;
   final List<String> errors;
   final List<String> warnings;
 
+  /// Number of `<<<` blocks seen, including malformed ones.
+  final int blockCount;
+
+  /// Character count of the input, reported in the header line.
+  final int charCount;
+
   const ParseResult({
     required this.actions,
     required this.errors,
     this.warnings = const [],
+    this.blockCount = 0,
+    this.charCount = 0,
   });
 
   bool get hasErrors => errors.isNotEmpty;
   bool get hasActions => actions.isNotEmpty;
 }
 
-/// Parses the DevRunner batch format:
+/// Parser for the block format:
 ///
 /// ```
-/// [ACTION]: CREATE_FILE
-/// [PATH]: /lib/
-/// [NAME]: main.dart
-/// [CONTENT]:
-/// <verbatim file body>
-/// [ENDFILE]
+/// <<<FILE_WRITE path="src/main.py">>>
+/// print("Hello World")
+/// <<<END>>>
+///
+/// <<<FILE_DELETE path="src/old_file.py">>>
+/// <<<FOLDER_CREATE path="src/utils">>>
+/// <<<FOLDER_DELETE path="src/legacy">>>
 /// ```
 ///
-/// Supported action types: CREATE_FILE, DELETE_FILE, CREATE_FOLDER,
-/// DELETE_FOLDER, SKIP_BINARY.
+/// Rules enforced here:
+///  * every FILE_WRITE must be closed by `<<<END>>>` (unclosed = error, never
+///    a silent guess at where the body ends),
+///  * the tag must name a known action,
+///  * `path="..."` must be present and must not escape the project.
 class CommandParserService {
-  static final String _tagAction = '[' + 'ACTION]:';
-  static final String _tagPath = '[' + 'PATH]:';
-  static final String _tagName = '[' + 'NAME]:';
-  static final String _tagContent = '[' + 'CONTENT]:';
-  static final String _tagEndFile = '[' + 'ENDFILE]';
-  static final String _tagRest = '[' + 'REST]:';
-
-  /// Removes markdown code fences from the outside of the input.
+  /// Matches a block opener: `<<<ACTION path="value">>>`.
   ///
-  /// Only fences that wrap the *whole* payload are removed. The previous
-  /// implementation joined every fenced block and dropped everything outside
-  /// them, which silently discarded real content when a file body happened to
-  /// contain its own fence.
-  static String _stripFences(String input) {
+  /// Double quotes are the documented form; single quotes are accepted too.
+  /// The quote character is interpolated from a code point so the regex can be
+  /// assembled entirely from raw strings - escaping quotes inside a raw string
+  /// would terminate the literal.
+  static final String _q = String.fromCharCode(39);
+
+  static final RegExp _openDouble = RegExp(
+    r'^<<<([A-Z_]+)\s*(?:path\s*=\s*"([^"]*)")?\s*>>>$',
+  );
+
+  /// Same shape with a single-quoted value; group 2 holds it either way.
+  static final RegExp _openSingle = RegExp(
+    r'^<<<([A-Z_]+)\s*(?:path\s*=\s*' +
+        _q +
+        r'([^' +
+        _q +
+        r']*)' +
+        _q +
+        r')?\s*>>>$',
+  );
+
+  /// Closing marker for a FILE_WRITE body.
+  static final RegExp _endPattern = RegExp(r'^<<<END>>>$');
+
+  /// A bare opener with no path, e.g. `<<<FOLDER_CREATE>>>`.
+  static final RegExp _bareTag = RegExp(r'^<<<([A-Z_]+)>>>$');
+
+  /// Phrases that mean "the model gave up and summarised".
+  static const List<String> _placeholderPhrases = [
+    'rest of code',
+    'rest of the code',
+    'rest of file',
+    'rest of the file',
+    'code unchanged',
+    'unchanged code',
+    'remains unchanged',
+    'no changes here',
+    'same as before',
+    'existing code here',
+    // Deliberately not "..." on its own: an ellipsis is legitimate in prose,
+    // and flagging every one of them would make the check noise.
+  ];
+
+  /// Names that are too generic to prove anything was written.
+  static const List<String> _placeholderOnlyMarkers = [
+    '...',
+    '// ...',
+    '# ...',
+    '/* ... */',
+    '<!-- ... -->',
+  ];
+
+  /// Removes a markdown fence that wraps the *entire* payload.
+  ///
+  /// Only a fence around everything is stripped. Joining every fenced block
+  /// would discard real content when a file body contains its own fence.
+  static String _stripOuterFence(String input) {
     final bt = String.fromCharCode(96);
-    final fencePattern = RegExp(
-      '^\\s*' + bt + '{3,4}(?:text|dart|js|html|json|sh)?\\s*\\n([\\s\\S]*?)\\n?\\s*' + bt + '{3,4}\\s*\$',
+    final pattern = RegExp(
+      '^\\s*' + bt + '{3,4}[a-zA-Z0-9_+-]*\\s*\\n([\\s\\S]*?)\\n?\\s*' + bt + '{3,4}\\s*\$',
     );
-    final match = fencePattern.firstMatch(input);
+    final match = pattern.firstMatch(input);
     return match != null ? (match.group(1) ?? '') : input;
-  }
-
-  /// Drops exactly the newline that the encoder appended to the last line.
-  ///
-  /// `content.trimRight()` used to be used here, which destroyed meaningful
-  /// trailing newlines and trailing spaces. Removing a single terminator makes
-  /// export -> parse a lossless round trip (including CRLF line endings).
-  static String _dropEncoderNewline(String content) {
-    if (content.endsWith('\n')) return content.substring(0, content.length - 1);
-    return content;
   }
 
   static ParseResult parse(String rawInput) {
@@ -71,131 +133,194 @@ class CommandParserService {
       return const ParseResult(actions: [], errors: ['Input text is empty']);
     }
 
-    final cleaned = _stripFences(rawInput);
+    final cleaned = _stripOuterFence(rawInput);
     final lines = cleaned.split('\n');
 
-    ActionType? currentType;
-    String? currentPath;
-    String? currentName;
-    final contentBuffer = StringBuffer();
-    bool readingContent = false;
-    bool ignoringRest = false;
+    var blockCount = 0;
+    var index = 0;
 
-    void flushAction() {
-      if (currentType != null) {
-        final type = currentType!;
-        final name = (currentName ?? '').trim();
-        final path = (currentPath ?? '').trim();
+    int i = 0;
+    while (i < lines.length) {
+      final trimmed = lines[i].trim();
 
-        if (path.isEmpty) {
-          errors.add('Missing [PATH] parameter for action ${type.name}');
-        } else if (name.isEmpty) {
-          errors.add('Missing [NAME] parameter for action ${type.name}');
-        } else {
-          final nameError = PathGuard.validateName(name);
-          if (nameError != null) {
-            errors.add('Invalid [NAME] "${name}" for ${type.name}: $nameError');
-          } else {
-            String normalizedPath = path.replaceAll(r'\', '/');
-            if (!normalizedPath.startsWith('/')) normalizedPath = '/$normalizedPath';
-            if (!normalizedPath.endsWith('/')) normalizedPath = '$normalizedPath/';
+      // Ignore anything outside a block: prose between blocks is common and
+      // harmless, unlike prose *inside* a file body.
+      if (!trimmed.startsWith('<<<')) {
+        i++;
+        continue;
+      }
 
-            actions.add(CommandAction(
-              type: type,
-              relativePath: normalizedPath,
-              name: name,
-              content: type == ActionType.createFile
-                  ? _dropEncoderNewline(contentBuffer.toString())
-                  : '',
-            ));
+      if (_endPattern.hasMatch(trimmed)) {
+        // An END whose opener was already rejected or already closed. Not worth
+        // a second error: the real problem is reported once, on the block.
+        i++;
+        continue;
+      }
+
+      final open = _openDouble.firstMatch(trimmed) ??
+          _openSingle.firstMatch(trimmed);
+      final bare = open == null ? _bareTag.firstMatch(trimmed) : null;
+
+      if (open == null && bare == null) {
+        errors.add('Unrecognised block on line ${i + 1}: $trimmed');
+        i++;
+        continue;
+      }
+
+      blockCount++;
+      index++;
+
+      final tag = (open ?? bare)!.group(1)!.toUpperCase();
+      // group(2) is the double-quoted value, group(3) the single-quoted one.
+      // A bare tag has neither, so the result is empty and reported below.
+      final rawPath = open != null ? (open.group(2) ?? '') : '';
+
+      final ActionType? type = switch (tag) {
+        'FILE_WRITE' || 'FILE_CREATE' || 'WRITE_FILE' => ActionType.writeFile,
+        'FILE_DELETE' || 'DELETE_FILE' => ActionType.deleteFile,
+        'FOLDER_CREATE' || 'CREATE_FOLDER' || 'MKDIR' => ActionType.createFolder,
+        'FOLDER_DELETE' || 'DELETE_FOLDER' || 'RMDIR' => ActionType.deleteFolder,
+        _ => null,
+      };
+
+      if (type == null) {
+        errors.add('Block $index: unknown action "$tag" on line ${i + 1}');
+        i++;
+        continue;
+      }
+
+      final path = rawPath.trim();
+      if (path.isEmpty) {
+        errors.add('Block $index: ${type.name} is missing path="..."');
+        i++;
+        continue;
+      }
+
+      final pathProblem = PathGuard.validateRelativePath(path);
+      if (pathProblem != null) {
+        errors.add('Block $index: $tag $path — $pathProblem');
+        // Still consumed so the body does not leak into the next block.
+        i = _skipToEnd(lines, i + 1, type);
+        continue;
+      }
+
+      if (type != ActionType.writeFile) {
+        actions.add(CommandAction(
+          type: type,
+          relativePath: path,
+          index: index,
+        ));
+        i++;
+        continue;
+      }
+
+      // ---- FILE_WRITE: body runs to <<<END>>> ----------------------------
+      final bodyStart = i + 1;
+      var bodyEnd = -1;
+      for (var j = bodyStart; j < lines.length; j++) {
+        if (_endPattern.hasMatch(lines[j].trim())) {
+          bodyEnd = j;
+          break;
+        }
+        // A new block opener before END means the END was forgotten. Treated as
+        // an error rather than as body text, so a missing END can never write a
+        // file containing the next block's markup.
+        if (lines[j].trim().startsWith('<<<') &&
+            !_endPattern.hasMatch(lines[j].trim())) {
+          break;
+        }
+      }
+
+      if (bodyEnd < 0) {
+        errors.add('Block $index: FILE_WRITE $path is missing <<<END>>>');
+        // Resume at the next opener so later blocks are still parsed. A stray
+        // <<<END>>> belonging to this block is consumed here rather than
+        // reported as a second, separate error.
+        var next = bodyStart;
+        while (next < lines.length) {
+          final t = lines[next].trim();
+          if (_endPattern.hasMatch(t)) {
+            next++;
+            break;
           }
+          if (t.startsWith('<<<')) break;
+          next++;
         }
+        i = next;
+        continue;
       }
-      currentType = null;
-      currentPath = null;
-      currentName = null;
-      contentBuffer.clear();
-      readingContent = false;
+
+      final body = lines.sublist(bodyStart, bodyEnd).join('\n');
+      actions.add(CommandAction(
+        type: ActionType.writeFile,
+        relativePath: path,
+        content: body,
+        index: index,
+      ));
+      i = bodyEnd + 1;
     }
 
-    for (int i = 0; i < lines.length; i++) {
-      final line = lines[i];
-      final trimmed = line.trim();
-
-      // Everything after a [REST]: marker belongs to prose (typically an AI's
-      // commentary appended after the last file). Without this boundary the
-      // trailing text was appended to the final file's contents.
-      if (trimmed == _tagRest) {
-        flushAction();
-        ignoringRest = true;
-        continue;
+    // ---- placeholder scan --------------------------------------------------
+    for (final action in actions) {
+      if (action.type != ActionType.writeFile || action.content.isEmpty) continue;
+      final hit = findPlaceholder(action.content);
+      if (hit != null) {
+        warnings.add(
+          'Block ${action.index} contains placeholder text on ${hit.toString()}: '
+          '"${hit.text.trim()}"',
+        );
       }
-      if (ignoringRest) continue;
-
-      if (trimmed == _tagEndFile) {
-        flushAction();
-        continue;
-      }
-
-      if (trimmed.startsWith(_tagAction)) {
-        flushAction();
-        final val = trimmed.substring(_tagAction.length).trim().toUpperCase();
-        switch (val) {
-          case 'CREATE_FILE':
-            currentType = ActionType.createFile;
-            break;
-          case 'DELETE_FILE':
-            currentType = ActionType.deleteFile;
-            break;
-          case 'CREATE_FOLDER':
-            currentType = ActionType.createFolder;
-            break;
-          case 'DELETE_FOLDER':
-            currentType = ActionType.deleteFolder;
-            break;
-          case 'SKIP_BINARY':
-            currentType = ActionType.skipBinary;
-            break;
-          default:
-            errors.add('Unknown action type: "$val" on line ${i + 1}');
-        }
-        continue;
-      }
-
-      if (!readingContent && trimmed.startsWith(_tagPath)) {
-        currentPath = trimmed.substring(_tagPath.length).trim();
-        continue;
-      }
-
-      if (!readingContent && trimmed.startsWith(_tagName)) {
-        currentName = trimmed.substring(_tagName.length).trim();
-        continue;
-      }
-
-      if (!readingContent && trimmed.startsWith(_tagContent)) {
-        // Guard against a file whose first line is itself the tag: treat the
-        // remainder of the tag line as the beginning of the body.
-        final inline = trimmed.substring(_tagContent.length).trim();
-        readingContent = true;
-        if (inline.isNotEmpty) contentBuffer.writeln(inline);
-        continue;
-      }
-
-      if (readingContent) {
-        contentBuffer.writeln(line);
-      }
-    }
-
-    flushAction();
-
-    if (currentPath != null && PathGuard.containsTraversal(currentPath!)) {
-      warnings.add('[PATH] "$currentPath" contains ".." segments and will be rejected');
     }
 
     return ParseResult(
       actions: actions,
       errors: errors,
       warnings: warnings,
+      blockCount: blockCount,
+      charCount: rawInput.length,
     );
   }
+
+  /// Advances past a rejected block so the next one is still parsed.
+  ///
+  /// Only a FILE_WRITE owns a body, so only a FILE_WRITE may consume lines
+  /// looking for `<<<END>>>`; skipping ahead for the others would swallow the
+  /// block that follows.
+  static int _skipToEnd(List<String> lines, int from, ActionType type) {
+    if (type != ActionType.writeFile) return from;
+    for (var j = from; j < lines.length; j++) {
+      final t = lines[j].trim();
+      if (_endPattern.hasMatch(t)) return j + 1;
+      if (t.startsWith('<<<')) return j;
+    }
+    return from;
+  }
+
+  /// Finds text that proves the model truncated the file.
+  ///
+  /// Returns the first hit, or null. An ellipsis alone only counts when it is
+  /// the entire body, because "..." in prose is normal.
+  static PlaceholderHit? findPlaceholder(String content) {
+    final lines = content.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      final lower = lines[i].toLowerCase();
+      for (final phrase in _placeholderPhrases) {
+        if (lower.contains(phrase)) {
+          return PlaceholderHit(i + 1, lines[i]);
+        }
+      }
+      final stripped = lines[i].trim();
+      if (_placeholderOnlyMarkers.contains(stripped) && lines.length == 1) {
+        return PlaceholderHit(i + 1, lines[i]);
+      }
+      // A bare ellipsis line surrounded by nothing else.
+      if ((stripped == '...' || stripped == '…') && lines.length <= 2) {
+        return PlaceholderHit(i + 1, lines[i]);
+      }
+    }
+    return null;
+  }
+
+  /// Convenience for callers that only need the contents.
+  static List<CommandAction> parseActions(String input) => parse(input).actions;
 }

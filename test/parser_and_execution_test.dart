@@ -60,42 +60,163 @@ void main() {
     test('root itself is not considered inside', () {
       expect(PathGuard.isInside(tempRoot.path, tempRoot.path), isFalse);
     });
+
+    test('validateRelativePath accepts normal project paths', () {
+      for (final good in [
+        'main.py',
+        'src/main.py',
+        'src/a/b/c.dart',
+        'a b/c.txt',
+        '.gitignore',
+        'dir.with.dots/file.dart',
+      ]) {
+        expect(PathGuard.validateRelativePath(good), isNull,
+            reason: '"$good" should be accepted');
+      }
+    });
+
+    test('validateRelativePath rejects anything that leaves the project', () {
+      for (final bad in [
+        '',
+        '   ',
+        '../x',
+        'a/../../b',
+        'a/..',
+        '/etc/passwd',
+        '//host/share/f',
+        r'C:\Windows',
+        '~/secret',
+        'a//b',
+        './a',
+        'a/b/',
+      ]) {
+        expect(PathGuard.validateRelativePath(bad), isNotNull,
+            reason: '"$bad" should be rejected');
+      }
+    });
   });
 
-  group('CommandParserService', () {
-    test('parses a create-file action', () {
+  group('Block parser', () {
+    test('parses a FILE_WRITE block', () {
       final result = CommandParserService.parse(
-        '[ACTION]: CREATE_FILE\n[PATH]: /lib/\n[NAME]: a.dart\n[CONTENT]:\nvoid main() {}\n[ENDFILE]',
+        '<<<FILE_WRITE path="src/main.py">>>\nprint("Hello World")\n<<<END>>>',
       );
       expect(result.errors, isEmpty);
       expect(result.actions, hasLength(1));
-      expect(result.actions.single.content, 'void main() {}');
+      expect(result.actions.single.type, ActionType.writeFile);
+      expect(result.actions.single.relativePath, 'src/main.py');
+      expect(result.actions.single.content, 'print("Hello World")');
     });
 
-    test('flags a traversal path as a blockable action, not a silent write', () {
-      final plan = FileExecutionService.plan(
-        rootDir: tempRoot.path,
-        actions: CommandParserService.parse(
-          '[ACTION]: CREATE_FILE\n[PATH]: /../../\n[NAME]: escape.txt\n[CONTENT]:\npwned',
-        ).actions,
-      );
-      expect(plan.errors, isNotEmpty);
-      expect(plan.runnable.where((i) => i.action.type == ActionType.createFile), isEmpty);
-    });
-
-    test('[REST] stops AI prose being appended to the last file', () {
+    test('parses all four block kinds', () {
       final result = CommandParserService.parse(
-        '[ACTION]: CREATE_FILE\n[PATH]: /\n[NAME]: x.txt\n[CONTENT]:\nbody\n'
-        '[REST]\nHere is a summary of the changes I made...',
+        '<<<FILE_WRITE path="src/main.py">>>\nx\n<<<END>>>\n'
+        '<<<FILE_DELETE path="src/old_file.py">>>\n'
+        '<<<FOLDER_CREATE path="src/utils">>>\n'
+        '<<<FOLDER_DELETE path="src/legacy">>>',
       );
+      expect(result.errors, isEmpty);
+      expect(result.blockCount, 4);
+      expect(result.actions.map((a) => a.type), [
+        ActionType.writeFile,
+        ActionType.deleteFile,
+        ActionType.createFolder,
+        ActionType.deleteFolder,
+      ]);
+      expect(result.actions.map((a) => a.relativePath), [
+        'src/main.py',
+        'src/old_file.py',
+        'src/utils',
+        'src/legacy',
+      ]);
+    });
+
+    test('a missing <<<END>>> is an error, not a body guess', () {
+      final result = CommandParserService.parse(
+        '<<<FILE_WRITE path="src/a.js">>>\nlet a = 1;',
+      );
+      expect(result.hasErrors, isTrue);
+      expect(result.errors.first, contains('missing <<<END>>>'));
+      expect(result.actions.where((a) => !a.isMalformed), isEmpty);
+    });
+
+    test('a block that begins before END does not swallow the next block', () {
+      final result = CommandParserService.parse(
+        '<<<FILE_WRITE path="a.txt">>>\nbody\n'
+        '<<<FILE_WRITE path="b.txt">>>\nsecond\n<<<END>>>',
+      );
+      // First block has no END: error. Second is still parsed.
+      expect(result.errors.any((e) => e.contains('a.txt')), isTrue);
+      expect(result.actions.single.relativePath, 'b.txt');
+      expect(result.actions.single.content, 'second');
+    });
+
+    test('rejects paths that escape the project', () {
+      for (final bad in [
+        '../secrets.txt',
+        'a/../../b',
+        '/etc/passwd',
+        r'C:\Windows\system32',
+        '~/secret',
+        'a//b',
+      ]) {
+        final result = CommandParserService.parse(
+          '<<<FILE_WRITE path="$bad">>>\nx\n<<<END>>>',
+        );
+        expect(result.hasErrors, isTrue, reason: '"$bad" should be rejected');
+        expect(result.actions, isEmpty, reason: '"$bad" must not become an action');
+      }
+    });
+
+    test('flags placeholder text so a truncated file is not written', () {
+      final result = CommandParserService.parse(
+        '<<<FILE_WRITE path="src/app.js">>>\n'
+        'const a = 1;\n'
+        '// rest of code unchanged\n'
+        '<<<END>>>',
+      );
+      expect(result.errors, isEmpty);
+      expect(result.warnings.single, contains('placeholder'));
+      expect(result.warnings.single, contains('line 2'));
+    });
+
+    test('a single ellipsis body counts as a placeholder', () {
+      final result = CommandParserService.parse(
+        '<<<FILE_WRITE path="a.txt">>>\n...\n<<<END>>>',
+      );
+      expect(result.warnings, isNotEmpty);
+    });
+
+    test('prose between blocks is ignored', () {
+      final result = CommandParserService.parse(
+        'Here are the changes.\n'
+        '<<<FILE_WRITE path="a.txt">>>\nbody\n<<<END>>>\n'
+        'Let me know if you need anything else.',
+      );
+      expect(result.errors, isEmpty);
       expect(result.actions.single.content, 'body');
     });
 
-    test('preserves trailing blank lines in file content', () {
+    test('an unknown action tag is reported', () {
       final result = CommandParserService.parse(
-        '[ACTION]: CREATE_FILE\n[PATH]: /\n[NAME]: y.txt\n[CONTENT]:\nline1\nline2\n\n',
+        '<<<FILE_RENAME path="a.txt">>>',
+      );
+      expect(result.hasErrors, isTrue);
+      expect(result.errors.first, contains('unknown action'));
+    });
+
+    test('bodies preserve trailing blank lines exactly', () {
+      final result = CommandParserService.parse(
+        '<<<FILE_WRITE path="y.txt">>>\nline1\nline2\n\n<<<END>>>',
       );
       expect(result.actions.single.content, 'line1\nline2\n');
+    });
+
+    test('counts lines for the log summary', () {
+      final result = CommandParserService.parse(
+        '<<<FILE_WRITE path="a.txt">>>\n1\n2\n3\n<<<END>>>',
+      );
+      expect(result.actions.single.lineCount, 3);
     });
   });
 
@@ -114,7 +235,57 @@ void main() {
       expect(parsed.actions.single.content, 'alpha\n\nbeta\n');
     });
 
-    test('binary files are marked SKIP_BINARY, never as text', () async {
+    test('uses the block format', () async {
+      final file = File(p.join(tempRoot.path, 'b.txt'));
+      await file.writeAsString('x\n');
+
+      final exported = await ExportService.generateBatchExport(
+        rootDir: tempRoot.path,
+        selectedPaths: {file.path},
+      );
+
+      expect(exported, contains('<<<FILE_WRITE path="b.txt">>>'));
+      expect(exported, contains('<<<END>>>'));
+      expect(exported, isNot(contains('[ACTION]')));
+    });
+
+    test('trailing newlines and CRLF survive the round trip', () async {
+      for (final body in ['no newline', 'one\n', 'two\n\n', 'a\r\nb\r\n']) {
+        final file = File(p.join(tempRoot.path, 'c.txt'));
+        await file.writeAsString(body);
+
+        final exported = await ExportService.generateBatchExport(
+          rootDir: tempRoot.path,
+          selectedPaths: {file.path},
+        );
+        final parsed = CommandParserService.parse(exported);
+        expect(parsed.actions.single.content, body,
+            reason: 'body ${body.replaceAll('\n', '\\n')}');
+      }
+    });
+
+    test('several files round trip in one batch', () async {
+      final a = File(p.join(tempRoot.path, 'a.txt'));
+      final b = File(p.join(tempRoot.path, 'b.txt'));
+      await a.writeAsString('alpha\n');
+      await b.writeAsString('beta\n\n');
+
+      final exported = await ExportService.generateBatchExport(
+        rootDir: tempRoot.path,
+        selectedPaths: {a.path, b.path},
+      );
+      final parsed = CommandParserService.parse(exported);
+
+      expect(parsed.errors, isEmpty);
+      expect(parsed.actions, hasLength(2));
+      final byPath = {
+        for (final action in parsed.actions) action.relativePath: action.content
+      };
+      expect(byPath['a.txt'], 'alpha\n');
+      expect(byPath['b.txt'], 'beta\n\n');
+    });
+
+    test('binary files are not exported as text', () async {
       final file = File(p.join(tempRoot.path, 'img.png'));
       await file.writeAsBytes([0x89, 0x50, 0x4E, 0x47, 0x00, 0x01, 0x02]);
 
@@ -123,74 +294,148 @@ void main() {
         selectedPaths: {file.path},
       );
 
-      expect(exported, contains('SKIP_BINARY'));
-      expect(CommandParserService.parse(exported).actions.single.type,
-          ActionType.skipBinary);
+      // A text placeholder would overwrite the real bytes with ASCII.
+      expect(exported, isNot(contains('FILE_WRITE')));
     });
   });
 
   group('FileExecutionService', () {
-    test('executes a create-file batch inside the workspace', () async {
-      final dir = Directory(p.join(tempRoot.path, 'sub'));
-      final logs = await FileExecutionService.executeBatch(
+    Future<BatchResult> run(List<CommandAction> actions,
+        {List<String>? errors}) async {
+      return FileExecutionService.execute(
         rootDir: tempRoot.path,
-        actions: [
-          const CommandAction(
-            type: ActionType.createFile,
-            relativePath: '/sub/',
-            name: 'new.txt',
-            content: 'hello',
-          ),
-        ],
+        actions: actions,
+        report: ParseReport(
+          blockCount: actions.length,
+          charCount: 10,
+          errors: errors ?? const [],
+        ),
         onLog: (_) {},
       );
+    }
 
-      expect(File(p.join(dir.path, 'new.txt')).readAsStringSync(), 'hello');
-      expect(logs.last.message, contains('Failed: 0'));
+    test('writes a new file and backs up nothing', () async {
+      final result = await run([
+        const CommandAction(
+          type: ActionType.writeFile,
+          relativePath: 'sub/new.txt',
+          content: 'hello',
+          index: 1,
+        ),
+      ]);
+
+      expect(File(p.join(tempRoot.path, 'sub', 'new.txt')).readAsStringSync(),
+          'hello');
+      expect(result.applied, 1);
+      expect(result.ok, isTrue);
+    });
+
+    test('backs up an existing file before overwriting', () async {
+      final target = File(p.join(tempRoot.path, 'keep.txt'));
+      await target.writeAsString('original');
+
+      await run([
+        const CommandAction(
+          type: ActionType.writeFile,
+          relativePath: 'keep.txt',
+          content: 'replacement',
+          index: 1,
+        ),
+      ]);
+
+      expect(target.readAsStringSync(), 'replacement');
+      final backups = Directory(p.join(tempRoot.path, '.backup'));
+      expect(backups.existsSync(), isTrue);
+      final files = backups
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((f) => p.basename(f.path) == 'keep.txt')
+          .toList();
+      expect(files, hasLength(1));
+      expect(files.single.readAsStringSync(), 'original');
+    });
+
+    test('nothing is written when the report has errors', () async {
+      final result = await run(
+        [
+          const CommandAction(
+            type: ActionType.writeFile,
+            relativePath: 'a.txt',
+            content: 'x',
+            index: 1,
+          ),
+        ],
+        errors: ['Block 1: FILE_WRITE a.txt is missing <<<END>>>'],
+      );
+
+      expect(result.aborted, isTrue);
+      expect(File(p.join(tempRoot.path, 'a.txt')).existsSync(), isFalse);
     });
 
     test('never writes outside the root even with a malicious action', () async {
-      final outside = File(p.join(tempRoot.parent.path, 'devrunner_escape_${DateTime.now().microsecondsSinceEpoch}.txt'));
+      final outside = File(p.join(tempRoot.parent.path,
+          'devrunner_escape_${DateTime.now().microsecondsSinceEpoch}.txt'));
 
-      await FileExecutionService.executeBatch(
-        rootDir: tempRoot.path,
-        actions: [
-          CommandAction(
-            type: ActionType.createFile,
-            relativePath: '/../../',
-            name: p.basename(outside.path),
-            content: 'should not exist',
-          ),
-        ],
-        onLog: (_) {},
-      );
+      final result = await run([
+        CommandAction(
+          type: ActionType.writeFile,
+          relativePath: '../${p.basename(outside.path)}',
+          content: 'should not exist',
+          index: 1,
+        ),
+      ]);
 
       expect(outside.existsSync(), isFalse);
+      expect(result.aborted, isTrue);
       if (outside.existsSync()) await outside.delete();
     });
 
-    test('a missing delete target is reported as skipped, not success', () async {
-      final logs = await FileExecutionService.executeBatch(
-        rootDir: tempRoot.path,
-        actions: [
-          const CommandAction(type: ActionType.deleteFile, relativePath: '/', name: 'ghost.txt'),
-        ],
-        onLog: (_) {},
-      );
-      expect(logs.last.message, contains('Success: 0'));
-      expect(logs.last.message, contains('Skipped: 1'));
+    test('deletes an existing file and reports it', () async {
+      final target = File(p.join(tempRoot.path, 'gone.txt'));
+      await target.writeAsString('bye');
+
+      final result = await run([
+        const CommandAction(
+          type: ActionType.deleteFile,
+          relativePath: 'gone.txt',
+          index: 1,
+        ),
+      ]);
+
+      expect(target.existsSync(), isFalse);
+      expect(result.applied, 1);
     });
 
-    test('plan() counts destructive actions for the confirmation sheet', () {
-      final plan = FileExecutionService.plan(
+    test('creating a folder that exists is skipped, not failed', () async {
+      final result = await run([
+        const CommandAction(
+          type: ActionType.createFolder,
+          relativePath: 'dup',
+          index: 1,
+        ),
+        const CommandAction(
+          type: ActionType.createFolder,
+          relativePath: 'dup',
+          index: 2,
+        ),
+      ]);
+
+      expect(result.applied, 1);
+      expect(result.skipped, 1);
+      expect(result.failed, 0);
+    });
+
+    test('plan() counts writes and destructive actions', () async {
+      final plan = await FileExecutionService.plan(
         rootDir: tempRoot.path,
         actions: const [
-          CommandAction(type: ActionType.deleteFolder, relativePath: '/old/', name: 'cache'),
-          CommandAction(type: ActionType.createFile, relativePath: '/', name: 'a.txt'),
+          CommandAction(type: ActionType.deleteFolder, relativePath: 'old', index: 1),
+          CommandAction(type: ActionType.writeFile, relativePath: 'a.txt', index: 2),
         ],
       );
       expect(plan.deleteCount, 1);
-      expect(plan.createCount, 1);
+      expect(plan.writeCount, 1);
+      expect(plan.rejected, isEmpty);
     });
   });
 

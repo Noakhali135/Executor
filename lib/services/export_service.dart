@@ -1,16 +1,11 @@
-import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'file_types.dart';
 import 'workspace_fs.dart';
 
 class ExportService {
-  static final String _tagActionCreate = '[' + 'ACTION]: CREATE_FILE';
-  static final String _tagActionSkip = '[' + 'ACTION]: SKIP_BINARY';
-  static final String _tagPath = '[' + 'PATH]: ';
-  static final String _tagName = '[' + 'NAME]: ';
-  static final String _tagContent = '[' + 'CONTENT]:';
-  static final String _tagEndFile = '[' + 'ENDFILE]';
+  static const String _openWrite = '<<<FILE_WRITE path="';
+  static const String _end = '<<<END>>>';
 
   static String formatSize(int bytes) => FileTypes.formatSize(bytes);
 
@@ -53,19 +48,12 @@ class ExportService {
           ? _relativeSaf(fullPath, rootDir)
           : p.relative(fullPath, from: rootDir);
 
-      String parentRel = p.dirname(relPath);
-      if (parentRel == '.' || parentRel.isEmpty || parentRel == '/') {
-        parentRel = '/';
-      } else {
-        if (!parentRel.startsWith('/')) parentRel = '/$parentRel';
-        if (!parentRel.endsWith('/')) parentRel = '$parentRel/';
-      }
+      // The new format uses one project-relative path per block, so the
+      // parent/name split is no longer needed.
+      final relative = relPath.replaceAll(r'\', '/');
+      if (relative.isEmpty || relative == '.') continue;
 
-      final fileName = isSafPath
-          ? fullPath.split('/').last
-          : p.basename(fullPath);
-
-      if (i > 0) buffer.writeln();
+      if (buffer.isNotEmpty) buffer.writeln();
 
       // Binary detection needs the extension list at minimum; SAF files are
       // classified by name because reading every byte twice is wasteful.
@@ -74,34 +62,22 @@ class ExportService {
           : await FileTypes.isBinary(File(fullPath));
 
       if (isBinary) {
-        final length = filesToProcess[fullPath] ?? 0;
-        buffer.writeln(_tagActionSkip);
-        buffer.writeln('$_tagPath$parentRel');
-        buffer.writeln('$_tagName$fileName');
-        buffer.writeln(_tagContent);
-        buffer.writeln('Size ${FileTypes.formatSize(length)} (binary asset — not modified)');
-        buffer.writeln(_tagEndFile);
+        // Binary payloads cannot be expressed in this format, and emitting a
+        // text placeholder would overwrite the real file with a few ASCII
+        // bytes. Emit nothing and say so in the header instead.
         continue;
       }
 
       final content = await WorkspaceFs.readString(fullPath);
-      if (content == null) {
-        final length = filesToProcess[fullPath] ?? 0;
-        buffer.writeln(_tagActionSkip);
-        buffer.writeln('$_tagPath$parentRel');
-        buffer.writeln('$_tagName$fileName');
-        buffer.writeln(_tagContent);
-        buffer.writeln('Size ${FileTypes.formatSize(length)} (unreadable — not modified)');
-        buffer.writeln(_tagEndFile);
-        continue;
-      }
+      if (content == null) continue;
 
-      buffer.writeln(_tagActionCreate);
-      buffer.writeln('$_tagPath$parentRel');
-      buffer.writeln('$_tagName$fileName');
-      buffer.writeln(_tagContent);
-      buffer.writeln(content);
-      buffer.writeln(_tagEndFile);
+      // The body is written verbatim. The newline after it exists only to put
+      // <<<END>>> on its own line, and the parser excludes that one line
+      // terminator, so file bodies round-trip exactly - including content that
+      // ends with one or more newlines, and CRLF endings.
+      buffer.write('$_openWrite$relative\">>>\n');
+      buffer.write(content);
+      buffer.write('\n$_end\n');
     }
 
     return buffer.toString();

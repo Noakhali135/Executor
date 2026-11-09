@@ -111,6 +111,13 @@ class WorkspaceFs {
   static Future<bool> writeString(String path, String content) =>
       writeBytes(path, Uint8List.fromList(content.codeUnits));
 
+  /// Copies one file, creating parents. Used by the pre-run backup.
+  static Future<bool> copyFile(String from, String to) async {
+    final bytes = await readBytes(from);
+    if (bytes == null) return false;
+    return writeBytes(to, bytes);
+  }
+
   static Future<bool> createDirectory(String path) async {
     if (isSaf(path)) return SafWorkspace.createDirectory(path);
     try {
