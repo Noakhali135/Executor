@@ -25,8 +25,14 @@ class WorkspaceFile {
   String get name => p.basename(path);
 
   Future<int> length() async {
+    // The tree walk already reports each file's size, so use it: reading the
+    // whole file just to learn how big it is doubled every SAF read.
     if (size >= 0) return size;
     if (SafWorkspace.isSafPath(path)) {
+      final info = await SafWorkspace.describe(path);
+      final reported = (info?['size'] as num?)?.toInt() ?? -1;
+      if (reported >= 0) return reported;
+      // Last resort: the provider reports no size at all.
       return (await readAsBytes()).length;
     }
     return File(path).length();
@@ -224,7 +230,9 @@ class WorkspaceProbe {
         skippedIgnored++;
         continue;
       }
-      files.add(WorkspaceFile(path, size: (row['size'] as int?) ?? -1));
+      // -1 means "unknown": WorkspaceFile.length() resolves it on demand
+      // instead of the walk paying a provider query for every entry.
+      files.add(WorkspaceFile(path, size: (row['size'] as num?)?.toInt() ?? -1));
     }
 
     return WorkspaceScan(

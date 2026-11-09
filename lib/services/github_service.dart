@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/command_action.dart';
@@ -159,6 +160,13 @@ class GitHubService {
   /// GitHub rejects blobs above 100 MB outright; we refuse earlier so a huge
   /// file cannot fail the whole push (or exhaust device memory).
   static const int maxBlobBytes = 45 * 1024 * 1024;
+
+  /// Parallel blob uploads.
+  ///
+  /// Memory is capped separately by [ByteBudget], so this no longer risks an
+  /// out-of-memory kill; it is sized to saturate a phone connection without the
+  /// per-socket cost of many more TLS handshakes.
+  static const int uploadConcurrency = 10;
 
   static const Duration _requestTimeout = Duration(seconds: 20);
 
@@ -881,23 +889,34 @@ class GitHubService {
     Set<String>? specificPaths,
     required Function(String message, LogLevel level) onLog,
   }) async {
-    final client = http.Client();
+    // `dart:io` defaults to 6 idle sockets per host, so ten concurrent uploads
+    // meant three of them waited for a free connection and paid for a fresh TLS
+    // handshake each time. Match the pool to the concurrency.
+    final client = IOClient(HttpClient()
+      ..maxConnectionsPerHost = uploadConcurrency
+      ..idleTimeout = const Duration(seconds: 15));
     final stopwatch = Stopwatch()..start();
 
     try {
       onLog('Connecting to GitHub API as @$owner...', LogLevel.info);
 
+      final scanTimer = Stopwatch()..start();
       final files = await _collectFiles(
         workingDir: workingDir,
         specificPaths: specificPaths,
         onLog: onLog,
       );
+      scanTimer.stop();
       if (files.isEmpty) {
         onLog('No files found to push to GitHub.', LogLevel.warning);
         return;
       }
 
-      onLog('Scanned ${files.length} file(s) in workspace.', LogLevel.info);
+      onLog(
+        'Scanned ${files.length} file(s) in '
+        '${(scanTimer.elapsedMilliseconds / 1000).toStringAsFixed(1)}s.',
+        LogLevel.info,
+      );
 
       // Resolve the target branch head (and the repo default as a fallback).
       String? parentCommitSha;
@@ -1001,51 +1020,70 @@ class GitHubService {
         candidates.add(file);
       }
 
+      // Hashing is only needed to prove a file is UNCHANGED.
+      //
+      // A path that does not exist in the remote tree has to be uploaded
+      // regardless, so its hash was never used. On a first push (or any new
+      // file) the old code still read every byte twice: once to hash, once to
+      // upload. That was the single biggest cost of a first push.
+      final toCompare = <WorkspaceFile>[];
+      final toUpload = <WorkspaceFile>[];
+      for (final file in candidates) {
+        final relPath = relPaths[file.path]!;
+        if (existingRemoteBlobs.containsKey(relPath)) {
+          toCompare.add(file);
+        } else {
+          newCount++;
+          toUpload.add(file);
+          totalUploadBytes += await file.length();
+        }
+      }
+
       onLog(
-        'Hashing ${candidates.length} file(s) (${_formatBytes(totalScannedBytes)})...',
+        '${toUpload.length} new file(s) need no hashing; '
+        'comparing ${toCompare.length} that already exist on GitHub.',
         LogLevel.info,
       );
 
-      // Hash SAF files natively: pulling every byte into Dart just to throw it
-      // away was the main memory spike on a large project.
-      final safPaths = candidates
-          .where((f) => SafWorkspace.isSafPath(f.path))
-          .map((f) => f.path)
-          .toList();
       PushProgressReporter.report(
         PushPhase.hashing,
         done: 0,
-        total: candidates.length,
-        message: 'Hashing ${candidates.length} file(s)...',
+        total: toCompare.length,
+        message: 'Comparing ${toCompare.length} file(s) with GitHub...',
       );
-      final nativeShas = await SafWorkspace.hashFiles(safPaths);
+
+      // Hash only what can actually turn out to be unchanged: SAF files
+      // natively (streamed, nothing crosses the channel), plain files here.
+      final compareSafPaths = toCompare
+          .where((f) => SafWorkspace.isSafPath(f.path))
+          .map((f) => f.path)
+          .toList();
+      final nativeShas = await SafWorkspace.hashFiles(compareSafPaths);
 
       if (cancelRequested) throw const PushCancelled();
 
-      // Hashing natively can come back empty if the walk was interrupted; say
-      // so once instead of logging a warning per file.
-      if (safPaths.isNotEmpty && nativeShas.isEmpty) {
+      if (compareSafPaths.isNotEmpty && nativeShas.isEmpty) {
         onLog(
-          '[WARN] Could not compare against GitHub; every file will be uploaded.',
+          '[WARN] Could not compare against GitHub; those file(s) will be '
+          'uploaded again.',
           LogLevel.warning,
         );
       }
 
       final remoteBefore = existingRemoteBlobs.length;
-      for (int i = 0; i < candidates.length; i++) {
-        final file = candidates[i];
+      for (int i = 0; i < toCompare.length; i++) {
+        final file = toCompare[i];
         final relPath = relPaths[file.path]!;
 
         final localSha = SafWorkspace.isSafPath(file.path)
             ? nativeShas[file.path]
             : await _calculateGitBlobShaStreaming(file);
 
-        // An unreadable file is treated as changed: the upload attempt then
-        // surfaces a real error instead of reporting "up to date" wrongly.
-
         final remoteSha = existingRemoteBlobs[relPath];
         if (localSha != null && remoteSha == localSha) {
           unchangedCount++;
+          // Reuse the remote blob by sha: this is what lets a commit include
+          // unchanged files without re-uploading them.
           treeNodes.add({
             'path': relPath,
             'mode': '100644',
@@ -1053,14 +1091,11 @@ class GitHubService {
             'sha': localSha,
           });
         } else {
-          if (remoteSha == null) {
-            newCount++;
-          } else {
-            modifiedCount++;
-          }
+          modifiedCount++;
           totalUploadBytes += await file.length();
-          filesToUpload.add(_PendingUpload(file: file, relPath: relPath));
+          toUpload.add(file);
         }
+
         if (localSha == null && !SafWorkspace.isSafPath(file.path)) {
           onLog('Could not hash ${file.name}; uploading it to be safe.', LogLevel.warning);
         }
@@ -1069,17 +1104,20 @@ class GitHubService {
 
         if (i % 25 == 0) {
           await Future.delayed(Duration.zero);
-          // The bar moves every 100 files; the log every 500 so it stays readable.
           PushProgressReporter.report(
             PushPhase.hashing,
             done: i,
-            total: candidates.length,
-            message: 'Compared $i of ${candidates.length} file(s) with GitHub',
+            total: toCompare.length,
+            message: 'Compared $i of ${toCompare.length} file(s) with GitHub',
           );
           if (i > 0 && i % 500 == 0) {
-            onLog('Hashed $i/${candidates.length} file(s)...', LogLevel.info);
+            onLog('Hashed $i/${toCompare.length} file(s)...', LogLevel.info);
           }
         }
+      }
+
+      for (final file in toUpload) {
+        filesToUpload.add(_PendingUpload(file: file, relPath: relPaths[file.path]!));
       }
 
       if (remoteBefore == 0 && candidates.isNotEmpty) {
@@ -1093,6 +1131,11 @@ class GitHubService {
         if (skippedTooLarge > 0) '$skippedTooLarge skipped (too large)',
       ].join(', ');
 
+      onLog(
+        'Compared in ${(stopwatch.elapsedMilliseconds / 1000).toStringAsFixed(1)}s '
+        '(scan alone: ${(scanTimer.elapsedMilliseconds / 1000).toStringAsFixed(1)}s).',
+        LogLevel.info,
+      );
       onLog('Diff analysis: $summaryDiff', LogLevel.info);
       onLog(
         'Payload: ${filesToUpload.length} file(s) to upload '
@@ -1112,9 +1155,6 @@ class GitHubService {
         return;
       }
 
-      // 16 workers meant 16 files resident at once *and* their base64 copies
-      // (~2.3x the bytes each). Six keeps the heap flat and is still fast.
-      const uploadConcurrency = 6;
       onLog(
         'Uploading ${filesToUpload.length} file(s) '
         '(${_formatBytes(totalUploadBytes)}) with $uploadConcurrency parallel workers...',
@@ -1259,6 +1299,10 @@ class GitHubService {
         message: 'All files uploaded. Creating the commit...',
       );
       onLog('Generating Git Tree with ${treeNodes.length} objects...', LogLevel.info);
+      // Unchanged files (added during the compare pass) and uploaded files
+      // (added by the workers) can arrive in any order; GitHub keys tree
+      // entries by path, so sort for a stable, reviewable payload.
+      treeNodes.sort((a, b) => (a['path'] as String).compareTo(b['path'] as String));
       final treePayload = <String, dynamic>{'tree': treeNodes};
       if (baseTreeSha != null) treePayload['base_tree'] = baseTreeSha;
 

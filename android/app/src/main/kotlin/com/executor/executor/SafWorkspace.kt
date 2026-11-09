@@ -255,10 +255,13 @@ class SafWorkspace(private val activity: Activity) {
                     if (name in IGNORED_DIRS) continue
                     walk(child, path, depth + 1)
                 } else {
+                    // length() is a ContentProvider query per file. Report
+                    // "unknown" here and let the caller ask only when it needs
+                    // the size; the walk itself must stay cheap.
                     out.add(
-                        mapOf(
+                        mapOf<String, Any>(
                             "path" to path,
-                            "size" to child.length(),
+                            "size" to -1,
                             "isDirectory" to 0
                         )
                     )

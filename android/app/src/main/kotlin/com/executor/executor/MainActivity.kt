@@ -36,7 +36,14 @@ class MainActivity : FlutterActivity() {
      * ContentProvider round trip. On the main thread that tripped Android's
      * "app not responding" watchdog and the process was killed mid-push.
      */
-    private val worker: ExecutorService = Executors.newSingleThreadExecutor()
+    /**
+     * A small pool, not a single thread.
+     *
+     * Upload workers read files one at a time, so a single-threaded executor
+     * serialised them all: six parallel uploads still waited on one reader.
+     * The pool is kept small because each in-flight read holds file bytes.
+     */
+    private val worker: ExecutorService = Executors.newFixedThreadPool(4)
     private val main = Handler(Looper.getMainLooper())
 
     private var progressSink: EventChannel.EventSink? = null
