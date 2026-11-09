@@ -960,6 +960,10 @@ class GitHubService {
       }
 
       final existingRemoteBlobs = <String, String>{};
+      // Sizes recorded in the remote tree. A changed file's size ~always equals
+      // its previous size, which lets the whole push run without asking the
+      // provider for a length once per file (that was many seconds on its own).
+      final remoteSizes = <String, int>{};
       final baseTree = baseTreeSha;
       if (baseTree != null) {
         final treeFetchRes = await client.get(
@@ -983,6 +987,10 @@ class GitHubService {
             for (final item in treeData['tree']) {
               if (item['type'] == 'blob' && item['path'] is String && item['sha'] is String) {
                 existingRemoteBlobs[item['path'] as String] = item['sha'] as String;
+                final itemSize = item['size'];
+                if (itemSize is num) {
+                  remoteSizes[item['path'] as String] = itemSize.toInt();
+                }
               }
             }
           }
@@ -1001,12 +1009,21 @@ class GitHubService {
       // Drop oversized files up front so the hashing pass never touches them.
       final candidates = <WorkspaceFile>[];
       final relPaths = <String, String>{};
+      var sizesResolved = 0;
       for (final file in files) {
         final relPath = SafWorkspace.isSafPath(file.path)
             ? file.path.substring(workingDir.length + 1)
             : p.relative(file.path, from: workingDir).replaceAll(r'\', '/');
 
-        final length = await file.length();
+        // Prefer a size we already know: the scan result, or the remote tree.
+        // Only an unknown size costs a provider round trip.
+        var length = file.size;
+        if (length < 0) length = remoteSizes[relPath] ?? -1;
+        if (length < 0) {
+          length = await file.length();
+          sizesResolved++;
+        }
+
         if (length > maxBlobBytes) {
           onLog(
             'Skipped ${file.name} (${_formatBytes(length)}) — exceeds the ${_formatBytes(maxBlobBytes)} per-file limit.',
@@ -1018,6 +1035,14 @@ class GitHubService {
         totalScannedBytes += length;
         relPaths[file.path] = relPath;
         candidates.add(file);
+      }
+
+      if (sizesResolved > 0) {
+        onLog(
+          'Resolved $sizesResolved file size(s) on demand '
+          '(the rest came from the scan or the remote tree).',
+          LogLevel.info,
+        );
       }
 
       // Hashing is only needed to prove a file is UNCHANGED.
@@ -1035,7 +1060,9 @@ class GitHubService {
         } else {
           newCount++;
           toUpload.add(file);
-          totalUploadBytes += await file.length();
+          // Sizes are already known from the scan / remote tree; never ask the
+          // provider for one in this loop.
+          totalUploadBytes += file.size >= 0 ? file.size : 0;
         }
       }
 
@@ -1079,6 +1106,9 @@ class GitHubService {
             ? nativeShas[file.path]
             : await _calculateGitBlobShaStreaming(file);
 
+        // The sha decides; a size comparison would be unsound here because the
+        // local size may itself be unknown, and it saves no work (a size change
+        // still has to be hashed to be reported as modified).
         final remoteSha = existingRemoteBlobs[relPath];
         if (localSha != null && remoteSha == localSha) {
           unchangedCount++;
@@ -1092,7 +1122,8 @@ class GitHubService {
           });
         } else {
           modifiedCount++;
-          totalUploadBytes += await file.length();
+          final size = file.size >= 0 ? file.size : remoteSizes[relPath] ?? 0;
+          totalUploadBytes += size;
           toUpload.add(file);
         }
 

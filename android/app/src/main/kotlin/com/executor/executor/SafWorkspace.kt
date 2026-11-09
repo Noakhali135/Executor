@@ -300,7 +300,11 @@ class SafWorkspace(private val activity: Activity) {
                 }
             }
             out.add(mapOf<String, Any>("path" to path, "sha" to sha))
-            if (index % 20 == 0) onProgress(index + 1, paths.size)
+            // Report every file: the UI bar is otherwise dead for the whole
+            // hashing pass, which is the longest phase on a large project.
+            if (index % 5 == 0 || index == paths.lastIndex) {
+                onProgress(index + 1, paths.size)
+            }
         }
         onProgress(out.size, paths.size)
         return out

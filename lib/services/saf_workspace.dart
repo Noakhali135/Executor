@@ -121,12 +121,15 @@ class SafWorkspace {
     if (paths.isEmpty) return const {};
     final out = <String, String?>{};
     // Chunked so one huge list never becomes one huge channel message.
-    const chunkSize = 200;
+    const chunkSize = 1000;
     for (var i = 0; i < paths.length; i += chunkSize) {
       // clamp() returns num; sublist() requires int.
       final end = (i + chunkSize) < paths.length ? (i + chunkSize) : paths.length;
       final chunk = paths.sublist(i, end);
       try {
+        // Large payloads are fine here (a mobile app, not a server), and this
+        // is the difference between one channel round trip and one per file:
+        // 144 files cost ~38s when hashed in small batches.
         final rows = await _channel.invokeListMethod<Map<Object?, Object?>>(
           'hashSafFiles',
           {'paths': chunk},
