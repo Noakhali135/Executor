@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
+import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../services/path_guard.dart';
 
@@ -22,12 +23,14 @@ class HtmlPreviewWidget extends StatefulWidget {
   final String htmlContent;
   final String baseDir;
   final String fileName;
+  final VoidCallback? onExitFullscreen;
 
   const HtmlPreviewWidget({
     super.key,
     required this.htmlContent,
     required this.baseDir,
     required this.fileName,
+    this.onExitFullscreen,
   });
 
   @override
@@ -234,15 +237,53 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
     super.dispose();
   }
 
+  Uri? get _previewUri {
+    final port = _serverPort;
+    if (port == null) return null;
+    return Uri(
+      scheme: 'http',
+      host: '127.0.0.1',
+      port: port,
+      // Match the exact loopback URL used by the embedded WebView.
+      path: '/',
+    );
+  }
+
   void _copyServerUrl() {
-    if (_serverPort == null) return;
-    final url = 'http://127.0.0.1:$_serverPort/';
-    Clipboard.setData(ClipboardData(text: url));
+    final uri = _previewUri;
+    if (uri == null) return;
+    Clipboard.setData(ClipboardData(text: uri.toString()));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Copied: $url'),
+        content: Text('Copied: $uri'),
         backgroundColor: const Color(0xFF10B981),
         duration: const Duration(milliseconds: 1200),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  Future<void> _openInBrowser() async {
+    final uri = _previewUri;
+    if (uri == null) {
+      _showBrowserError('The local preview server is not ready yet.');
+      return;
+    }
+
+    try {
+      final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!opened) _showBrowserError('Could not open the preview in a browser.');
+    } catch (_) {
+      _showBrowserError('Could not open the preview in a browser.');
+    }
+  }
+
+  void _showBrowserError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: const Color(0xFFDC2626),
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -258,9 +299,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
 
   @override
   Widget build(BuildContext context) {
-    final displayUrl = _serverPort != null
-        ? 'http://127.0.0.1:$_serverPort/${widget.fileName}'
-        : 'about:blank';
+    final displayUrl = _previewUri?.toString() ?? 'Starting local preview…';
 
     return Column(
       children: [
@@ -302,6 +341,21 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
                   child: Icon(Icons.refresh_rounded, size: 16, color: Color(0xFFCBD5E1)),
                 ),
               ),
+              Tooltip(
+                message: 'Open in browser',
+                child: InkWell(
+                  onTap: _openInBrowser,
+                  borderRadius: BorderRadius.circular(6),
+                  child: const Padding(
+                    padding: EdgeInsets.all(5),
+                    child: Icon(
+                      Icons.open_in_browser_rounded,
+                      size: 17,
+                      color: Color(0xFFCBD5E1),
+                    ),
+                  ),
+                ),
+              ),
               InkWell(
                 onTap: _copyServerUrl,
                 borderRadius: BorderRadius.circular(6),
@@ -310,6 +364,22 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
                   child: Icon(Icons.copy_rounded, size: 15, color: Color(0xFFCBD5E1)),
                 ),
               ),
+              if (widget.onExitFullscreen != null)
+                Tooltip(
+                  message: 'Back to editor',
+                  child: InkWell(
+                    onTap: widget.onExitFullscreen,
+                    borderRadius: BorderRadius.circular(6),
+                    child: const Padding(
+                      padding: EdgeInsets.all(5),
+                      child: Icon(
+                        Icons.fullscreen_exit_rounded,
+                        size: 18,
+                        color: Color(0xFFCBD5E1),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -328,6 +398,58 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
           ),
         ),
       ],
+    );
+  }
+}
+
+
+/// Full-window route for an HTML preview. It sits above the file editor and
+/// requests immersive Android system bars while the preview is open.
+class HtmlPreviewScreen extends StatefulWidget {
+  final String htmlContent;
+  final String baseDir;
+  final String fileName;
+
+  const HtmlPreviewScreen({
+    super.key,
+    required this.htmlContent,
+    required this.baseDir,
+    required this.fileName,
+  });
+
+  @override
+  State<HtmlPreviewScreen> createState() => _HtmlPreviewScreenState();
+}
+
+class _HtmlPreviewScreenState extends State<HtmlPreviewScreen> {
+  @override
+  void initState() {
+    super.initState();
+    if (Platform.isAndroid) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    }
+  }
+
+  @override
+  void dispose() {
+    if (Platform.isAndroid) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final preview = HtmlPreviewWidget(
+      htmlContent: widget.htmlContent,
+      baseDir: widget.baseDir,
+      fileName: widget.fileName,
+      onExitFullscreen: () => Navigator.of(context).pop(),
+    );
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF070B14),
+      body: SafeArea(child: preview),
     );
   }
 }

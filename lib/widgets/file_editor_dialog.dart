@@ -223,6 +223,30 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
     }
   }
 
+  Future<void> _openHtmlPreview(String fileName) async {
+    // Save first so relative assets (CSS, scripts, images) match the HTML
+    // buffer being previewed. The entry document itself is served from the
+    // live editor buffer.
+    if (_isDirty) await _saveFile();
+    if (!mounted) return;
+
+    setState(() => _activeTab = 1);
+    try {
+      await Navigator.of(context, rootNavigator: true).push<void>(
+        MaterialPageRoute<void>(
+          fullscreenDialog: true,
+          builder: (_) => HtmlPreviewScreen(
+            htmlContent: _codeController.text,
+            baseDir: p.dirname(widget.filePath),
+            fileName: fileName,
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _activeTab = 0);
+    }
+  }
+
   Future<void> _saveFile() async {
     if (_isBinary || _isImage) return;
     setState(() => _isSaving = true);
@@ -379,13 +403,7 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
                               ),
                             ),
                             InkWell(
-                              onTap: () async {
-                                // The preview server reads from disk for assets,
-                                // so flush pending edits first; otherwise the
-                                // rendered page silently ignored them.
-                                if (_isDirty) await _saveFile();
-                                if (mounted) setState(() => _activeTab = 1);
-                              },
+                              onTap: () => _openHtmlPreview(fileName),
                               borderRadius: const BorderRadius.horizontal(right: Radius.circular(8)),
                               child: Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -467,13 +485,7 @@ class _FileEditorDialogState extends State<FileEditorDialog> {
                                   ],
                                 ),
                               )
-                            : _isHtml && _activeTab == 1
-                                ? HtmlPreviewWidget(
-                                    htmlContent: _codeController.text,
-                                    baseDir: p.dirname(widget.filePath),
-                                    fileName: fileName,
-                                  )
-                                : Container(
+                            : Container(
                                     color: const Color(0xFF070B14),
                                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                                     child: TextField(
