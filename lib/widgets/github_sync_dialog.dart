@@ -100,10 +100,19 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     return names;
   }
 
-  /// The repository the next push will go to.
+  /// The repository the next push will go to; '' when nothing is chosen.
+  ///
+  /// Single source of truth: the destination banner, the button label and the
+  /// push itself all read this, so what is displayed cannot differ from where
+  /// the commit actually goes.
   String get _pushDestination {
     if (_isCreateNew) return _newRepoController.text.trim();
-    return (_selectedRepo ?? '').trim();
+    final resolved = resolveTargetRepo(
+      selected: _selectedRepo,
+      available: _repoNames,
+      pickedByUser: _repoPickedByUser,
+    );
+    return (resolved ?? '').trim();
   }
 
   String get _pushDestinationLabel {
@@ -313,18 +322,12 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     // used repo even though another one was selected on screen. There is no
     // more fallback-to-saved: either the user picked something (dropdown or
     // "Create New"), or the push stops and asks.
-    String? targetRepo;
-    if (_isCreateNew) {
-      targetRepo = _newRepoController.text.trim();
-    } else {
-      targetRepo = resolveTargetRepo(
-        selected: _selectedRepo,
-        available: _repoNames,
-        pickedByUser: _repoPickedByUser,
-      );
-    }
+    // Non-nullable from here on, so it survives the awaits below: a nullable
+    // local is not promoted across an await boundary. Same getter the banner
+    // and the button use, so they cannot disagree.
+    final String target = _pushDestination;
 
-    if (targetRepo.isEmpty) {
+    if (target.isEmpty) {
       if (mounted) {
         setState(() => _isPushing = false);
         ScaffoldMessenger.of(context).showSnackBar(
@@ -339,13 +342,13 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     }
 
     // Never let the model and the screen disagree about the destination.
-    if (_selectedRepo != targetRepo && mounted) {
-      setState(() => _selectedRepo = targetRepo);
+    if (_selectedRepo != target && mounted) {
+      setState(() => _selectedRepo = target);
     }
 
     // Say it once, loudly, before a single byte is uploaded.
     widget.onLog(
-      'Pushing to repository: $targetRepo'
+      'Pushing to repository: $target'
       '${_isCreateNew ? ' (new)' : ''}',
       LogLevel.info,
     );
@@ -393,10 +396,10 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     });
 
     if (_isCreateNew) {
-      widget.onLog('Creating new repository "$targetRepo" on GitHub...', LogLevel.info);
+      widget.onLog('Creating new repository "$target" on GitHub...', LogLevel.info);
       final created = await GitHubService.createRepository(
         token: _savedToken!,
-        repoName: targetRepo,
+        repoName: target,
         isPrivate: _isPrivate,
         description: 'Created with DevRunner Mobile',
       );
@@ -425,12 +428,12 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       widget.onLog('[SUCCESS] ${created.message}', LogLevel.success);
       // Adopt the canonical name GitHub returned (it may differ in casing) and
       // treat the new repo as the selected one from now on.
-      final canonical = created.repoName ?? targetRepo;
+      final canonical = created.repoName ?? target;
       await GitHubService.saveRepo(canonical);
       _selectedRepo = canonical;
       _branchController.text = 'main';
     } else {
-      await GitHubService.saveRepo(targetRepo);
+      await GitHubService.saveRepo(target);
     }
 
     // Capture a context that outlives this dialog: the re-auth prompt is shown
@@ -450,7 +453,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       await GitHubService.pushWorkspace(
         token: _savedToken!,
         owner: _username!,
-        repoName: targetRepo,
+        repoName: target,
         branch: branch,
         commitMessage: commitMsg,
         workingDir: widget.workingDir,

@@ -907,9 +907,10 @@ class GitHubService {
       }
 
       final existingRemoteBlobs = <String, String>{};
-      if (baseTreeSha != null) {
+      final baseTree = baseTreeSha;
+      if (baseTree != null) {
         final treeFetchRes = await client.get(
-          _repoUri(owner, repoName, '/git/trees/${_seg(baseTreeSha!)}?recursive=1'),
+          _repoUri(owner, repoName, '/git/trees/${_seg(baseTree)}?recursive=1'),
           headers: _headers(token),
         ).timeout(_requestTimeout);
 
