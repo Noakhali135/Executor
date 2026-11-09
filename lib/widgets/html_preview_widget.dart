@@ -403,8 +403,8 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
 }
 
 
-/// Full-window route for an HTML preview. It sits above the file editor and
-/// requests immersive Android system bars while the preview is open.
+/// Full-window route for an HTML preview. It covers the editor chrome while
+/// retaining the operating system's status and navigation bars.
 class HtmlPreviewScreen extends StatefulWidget {
   final String htmlContent;
   final String baseDir;
@@ -425,17 +425,11 @@ class _HtmlPreviewScreenState extends State<HtmlPreviewScreen> {
   @override
   void initState() {
     super.initState();
-    if (Platform.isAndroid) {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    }
-  }
-
-  @override
-  void dispose() {
+    // Keep Android's status and navigation bars visible in the full-screen
+    // preview; SafeArea below keeps the preview controls clear of both.
     if (Platform.isAndroid) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     }
-    super.dispose();
   }
 
   @override
