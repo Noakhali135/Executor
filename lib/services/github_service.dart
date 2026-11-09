@@ -1385,9 +1385,40 @@ class GitHubService {
       message: 'Scanning the workspace (this is the slow part for big projects)...',
     );
 
-    final scan = specificPaths != null && specificPaths.isNotEmpty
-        ? await WorkspaceProbe.scan(workingDir, maxFiles: 5000, specificPaths: specificPaths)
-        : await WorkspaceProbe.scanForPush(workingDir, maxFiles: 5000);
+    // A granted folder is walked natively, so listen for its heartbeat: without
+    // it the bar would sit still for however long the walk takes and the user
+    // would assume the app had frozen again.
+    StreamSubscription<Map<String, Object?>>? heartbeat;
+    if (SafWorkspace.isSafPath(workingDir)) {
+      heartbeat = SafWorkspace.progress.listen(
+        (event) {
+          if (event['type'] != 'scan') return;
+          final scanned = (event['scanned'] as num?)?.toInt() ?? 0;
+          final dirs = (event['dirs'] as num?)?.toInt() ?? 0;
+          PushProgressReporter.report(
+            PushPhase.scanning,
+            done: scanned,
+            total: 0,
+            message: 'Found $scanned file(s) in $dirs folder(s) so far...',
+          );
+        },
+        onError: (_) {},
+      );
+    }
+
+    final WorkspaceScan scan;
+    try {
+      scan = specificPaths != null && specificPaths.isNotEmpty
+          ? await WorkspaceProbe.scan(workingDir,
+              maxFiles: 5000, specificPaths: specificPaths)
+          : await WorkspaceProbe.scanForPush(workingDir, maxFiles: 5000);
+    } finally {
+      try {
+        await heartbeat?.cancel();
+      } catch (_) {
+        // A broken progress stream must never fail the push itself.
+      }
+    }
 
     PushProgressReporter.report(
       PushPhase.scanning,

@@ -652,15 +652,41 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
             onChanged: (val) => setState(() => _isPrivate = val),
           ),
         ] else ...[
+          // A failed list download must be visible and retryable rather than
+          // looking like "this account has no repositories".
+          if (_reposError != null && !_isLoadingRepos)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _reposError!,
+                      style: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 11),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      final token = _savedToken;
+                      if (token == null || token.isEmpty) return;
+                      _fetchRepos(token, preferredRepo: _selectedRepo);
+                    },
+                    child: const Text('Retry', style: TextStyle(fontSize: 11)),
+                  ),
+                ],
+              ),
+            ),
           if (_isLoadingRepos)
             const Center(child: Padding(padding: EdgeInsets.all(8.0), child: CircularProgressIndicator(strokeWidth: 2)))
           else
             DropdownButtonFormField<String>(
               value: _selectedRepo,
               hint: Text(
-                _userRepos.isEmpty
-                    ? 'No repositories found — try "Create New"'
-                    : 'Select a repository',
+                _reposError != null
+                    ? 'Could not load your repositories — tap Retry'
+                    : _userRepos.isEmpty
+                        ? 'No repositories found — try "Create New"'
+                        : 'Select a repository',
                 style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
               ),
               dropdownColor: const Color(0xFF111827),

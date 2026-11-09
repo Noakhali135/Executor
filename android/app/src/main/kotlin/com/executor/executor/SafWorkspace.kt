@@ -7,7 +7,6 @@ import android.net.Uri
 import android.util.Base64
 import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
-import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
 /**
@@ -24,8 +23,8 @@ import io.flutter.plugin.common.MethodChannel
  *
  *     /devrunner-saf/<treeId>/<relative path...>
  *
- * [SafFile] and [SafDirectory] make that path behave like `java.io.File`, so
- * the scanner, exporter and GitHub push code work unchanged.
+ * [resolve] turns such a path back into a DocumentFile, so the scanner,
+ * exporter and GitHub push code work unchanged.
  */
 class SafWorkspace(private val activity: Activity) {
 
@@ -287,16 +286,17 @@ class SafWorkspace(private val activity: Activity) {
         for ((index, path) in paths.withIndex()) {
             if (cancelled) break
             val file = resolve(path)
-            if (file == null || !file.isFile) {
-                out.add(mapOf("path" to path, "sha" to null))
-                continue
+            // "" means "could not hash"; the Dart side treats it as changed.
+            val sha = if (file == null || !file.isFile) {
+                ""
+            } else {
+                try {
+                    blobSha(file) ?: ""
+                } catch (_: Exception) {
+                    ""
+                }
             }
-            val sha = try {
-                blobSha(file)
-            } catch (_: Exception) {
-                null
-            }
-            out.add(mapOf("path" to path, "sha" to sha))
+            out.add(mapOf<String, Any>("path" to path, "sha" to sha))
             if (index % 20 == 0) onProgress(index + 1, paths.size)
         }
         onProgress(out.size, paths.size)
@@ -382,8 +382,10 @@ class SafWorkspace(private val activity: Activity) {
         for (child in children) {
             val name = child.name ?: continue
             val path = if (virtualPath.endsWith("/")) "$virtualPath$name" else "$virtualPath/$name"
+            // Explicit <String, Any>: the prefix "path"/"name" match String but
+            // the 1/0 and length values would otherwise widen the value type.
             out.add(
-                mapOf(
+                mapOf<String, Any>(
                     "path" to path,
                     "name" to name,
                     "isDirectory" to if (child.isDirectory) 1 else 0,

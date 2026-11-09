@@ -54,7 +54,9 @@ class PushProgress {
   /// 0..1, or null when the phase has no measurable total.
   double? get fraction {
     if (total <= 0) return null;
-    return (done / total).clamp(0.0, 1.0);
+    final value = done / total;
+    // clamp() is declared to return num, so convert explicitly.
+    return value < 0 ? 0.0 : (value > 1 ? 1.0 : value);
   }
 
   String get label => switch (phase) {

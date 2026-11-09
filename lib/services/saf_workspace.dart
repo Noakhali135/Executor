@@ -8,7 +8,8 @@ import 'package:path/path.dart' as p;
 class SafTree {
   final String treeId;
 
-  /// The path the rest of the app uses, e.g. `/devrunner-saf/primary:Download/app`.
+  /// The opaque virtual path the rest of the app uses, e.g.
+  /// `/devrunner-saf/cHJpbWFyeTpEb3dubG9hZC9hcHA`.
   final String virtualPath;
 
   /// Human readable location, e.g. `Download/rou_is-Full-Project`.
@@ -122,7 +123,9 @@ class SafWorkspace {
     // Chunked so one huge list never becomes one huge channel message.
     const chunkSize = 200;
     for (var i = 0; i < paths.length; i += chunkSize) {
-      final chunk = paths.sublist(i, (i + chunkSize).clamp(0, paths.length));
+      // clamp() returns num; sublist() requires int.
+      final end = (i + chunkSize) < paths.length ? (i + chunkSize) : paths.length;
+      final chunk = paths.sublist(i, end);
       try {
         final rows = await _channel.invokeListMethod<Map<Object?, Object?>>(
           'hashSafFiles',
@@ -130,7 +133,11 @@ class SafWorkspace {
         );
         for (final row in rows ?? const <Map<Object?, Object?>>[]) {
           final path = row['path'] as String?;
-          if (path != null) out[path] = row['sha'] as String?;
+          if (path == null) continue;
+          final sha = row['sha'] as String?;
+          // Native code returns "" for "could not hash"; normalise to null so
+          // the caller uploads the file instead of comparing against "".
+          out[path] = (sha == null || sha.isEmpty) ? null : sha;
         }
       } catch (_) {
         // Leave these unresolved; the caller treats a missing sha as changed.
