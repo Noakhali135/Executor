@@ -710,6 +710,17 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
         return;
       }
 
+      // WebView probes /favicon.ico even when the page has no icon. Treat a
+      // missing optional icon as a clean empty response, not a render error.
+      if (rawPath == 'favicon.ico' && !await WorkspaceFs.exists(targetPath)) {
+        await _respondPreviewNoContent(
+          request,
+          startedAt: startedAt,
+          reason: 'optional favicon not present',
+        );
+        return;
+      }
+
       if (WorkspaceFs.isSaf(targetPath)) {
         if (request.method == 'HEAD') {
           final exists = await WorkspaceFs.exists(targetPath);
@@ -852,6 +863,24 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
     if (length >= 0) {
       response.headers.set(HttpHeaders.contentLengthHeader, length);
     }
+  }
+
+  Future<void> _respondPreviewNoContent(
+    HttpRequest request, {
+    required DateTime startedAt,
+    required String reason,
+  }) async {
+    request.response.statusCode = HttpStatus.noContent;
+    request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+    await request.response.close();
+    _recordLocalResponse(
+      request,
+      HttpStatus.noContent,
+      '(no content)',
+      0,
+      startedAt,
+      source: reason,
+    );
   }
 
   Future<void> _respondPreviewText(
