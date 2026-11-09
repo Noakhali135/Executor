@@ -480,4 +480,92 @@ void main() {
       }
     });
   });
+
+  group('Repository targeting', () {
+    const repos = ['alpha', 'beta', 'gamma'];
+
+    test('a manual pick always wins over the saved repo', () {
+      // The reported bug: "beta" was chosen, but the push went to "alpha".
+      expect(
+        resolveTargetRepo(
+          selected: 'beta',
+          available: repos,
+          pickedByUser: true,
+          saved: 'alpha',
+        ),
+        'beta',
+      );
+    });
+
+    test('a manual pick survives an empty or failed repo list', () {
+      expect(
+        resolveTargetRepo(
+          selected: 'beta',
+          available: const [],
+          pickedByUser: true,
+          saved: 'alpha',
+        ),
+        'beta',
+      );
+    });
+
+    test('matching ignores case and surrounding whitespace', () {
+      expect(
+        resolveTargetRepo(
+          selected: '  BETA ',
+          available: repos,
+          pickedByUser: false,
+          saved: null,
+        ),
+        'beta',
+      );
+    });
+
+    test('never substitutes a saved repo that is no longer listed', () {
+      // Would previously have pushed into "ghost".
+      expect(
+        resolveTargetRepo(
+          selected: null,
+          available: repos,
+          pickedByUser: false,
+          saved: 'ghost',
+        ),
+        isNull,
+      );
+    });
+
+    test('falls back to the saved repo only when it is still listed', () {
+      expect(
+        resolveTargetRepo(
+          selected: null,
+          available: repos,
+          pickedByUser: false,
+          saved: 'BETA',
+        ),
+        'beta',
+      );
+    });
+
+    test('uses the only repo when nothing else is known', () {
+      expect(
+        resolveTargetRepo(
+          selected: null,
+          available: const ['solo'],
+          pickedByUser: false,
+        ),
+        'solo',
+      );
+    });
+
+    test('returns null when there is nothing to choose from', () {
+      expect(
+        resolveTargetRepo(
+          selected: '   ',
+          available: const ['a', 'b'],
+          pickedByUser: false,
+        ),
+        isNull,
+      );
+    });
+  });
 }

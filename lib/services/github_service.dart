@@ -69,6 +69,47 @@ class CreateRepoResult {
 /// should retry with it.
 typedef ReauthPrompt = Future<String?> Function(GitHubAuthException error);
 
+/// Decides which repository a push should target.
+///
+/// Extracted so the rule can be tested without a widget: the user's explicit
+/// choice always wins, a name that only differs in case or whitespace is still
+/// a match, and a failed list never resets a valid selection. The bug this
+/// replaces pushed into the previously saved repository while a different one
+/// was visibly selected.
+String? resolveTargetRepo({
+  required String? selected,
+  required List<String> available,
+  required bool pickedByUser,
+  String? saved,
+}) {
+  final choice = (selected ?? '').trim();
+
+  if (pickedByUser) {
+    // Whatever the user tapped, even if the list is stale or empty.
+    return choice.isEmpty ? null : choice;
+  }
+
+  if (choice.isNotEmpty) {
+    for (final name in available) {
+      if (name.trim().toLowerCase() == choice.toLowerCase()) return name.trim();
+    }
+    // The selection is valid even when it is not in this particular list.
+    return choice;
+  }
+
+  final savedName = (saved ?? '').trim();
+  if (savedName.isNotEmpty) {
+    for (final name in available) {
+      if (name.trim().toLowerCase() == savedName.toLowerCase()) return name.trim();
+    }
+    // Do NOT invent a repository from a stale preference: that is how a push
+    // ended up in the wrong place. Only fall back when it is still listed.
+    if (available.isEmpty) return savedName;
+  }
+
+  return available.length == 1 ? available.first.trim() : null;
+}
+
 /// Result of listing the authenticated user's repositories.
 class RepoListResult {
   final List<Map<String, dynamic>> repos;

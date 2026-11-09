@@ -72,7 +72,97 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     }
   }
 
+  /// Generation counter for [_fetchRepos].
+  ///
+  /// The dropdown starts a refresh when it shows, and every refresh used to
+  /// apply its own result on arrival. Opening the dialog and grabbing a
+  /// dropdown before the list finished meant the in-flight *initial* request
+  /// landed afterwards and put the saved repository straight back - so the
+  /// push went to the old repo even though a different one was visibly
+  /// selected. Only the newest request may now touch the selection.
+  int _reposRequestId = 0;
+
+  /// True once the user picked a repository by hand. Nothing may override it.
+  bool _repoPickedByUser = false;
+
+  /// Names available in the dropdown: the fetched list plus the selection
+  /// itself, so a repo that is missing from a stale list is still selectable.
+  List<String> get _repoNames {
+    final names = <String>[
+      for (final repo in _userRepos)
+        if ((repo['name'] as String?)?.trim().isNotEmpty ?? false)
+          (repo['name'] as String).trim(),
+    ];
+    final selected = (_selectedRepo ?? '').trim();
+    if (selected.isNotEmpty && !names.any((n) => n.toLowerCase() == selected.toLowerCase())) {
+      names.insert(0, selected);
+    }
+    return names;
+  }
+
+  /// The repository the next push will go to.
+  String get _pushDestination {
+    if (_isCreateNew) return _newRepoController.text.trim();
+    return (_selectedRepo ?? '').trim();
+  }
+
+  String get _pushDestinationLabel {
+    final target = _pushDestination;
+    if (target.isEmpty) return 'Choose a repository';
+    return 'Push to $target';
+  }
+
+  Widget _destinationBanner() {
+    final target = _pushDestination;
+    final ready = target.isNotEmpty;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: ready ? const Color(0xFF0F1F1A) : const Color(0xFF2A1215),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: ready ? const Color(0xFF10B981) : const Color(0xFFDC2626),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            ready ? Icons.arrow_forward_rounded : Icons.warning_amber_rounded,
+            size: 14,
+            color: ready ? const Color(0xFF34D399) : const Color(0xFFF87171),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              ready
+                  ? 'Pushing to $_username/$target'
+                      '${_isCreateNew ? ' (will be created)' : ''}'
+                  : 'Pick a repository — nothing will be pushed without one.',
+              style: TextStyle(
+                color: ready ? const Color(0xFFA7F3D0) : const Color(0xFFFCA5A5),
+                fontSize: 11.5,
+                height: 1.3,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _repoLabel(String name) {
+    for (final repo in _userRepos) {
+      if ((repo['name'] as String?)?.trim().toLowerCase() == name.toLowerCase()) {
+        return '$name ${repo['private'] == true ? '🔒' : '🌐'}';
+      }
+    }
+    // Not in the list we fetched, but still the chosen target.
+    return '$name (selected)';
+  }
+
   Future<void> _fetchRepos(String token, {String? preferredRepo}) async {
+    final requestId = ++_reposRequestId;
+
     setState(() {
       _isLoadingRepos = true;
       _reposError = null;
@@ -82,6 +172,9 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     final repos = result.repos;
 
     if (!mounted) return;
+
+    // A newer request superseded this one; its answer is the truth.
+    if (requestId != _reposRequestId) return;
 
     if (repos.isEmpty) {
       // Keep whatever the user already had: a failed or rate-limited list must
@@ -96,6 +189,17 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       if (result.error != null) {
         widget.onLog('[REPOS] ${result.error!}', LogLevel.warning);
       }
+      return;
+    }
+
+    // The user's own choice always wins, even if it is not in this list (a
+    // freshly created repo, or a stale list). This is the rule that stops a
+    // push from ever silently landing in a different repository.
+    if (_repoPickedByUser && (_selectedRepo ?? '').trim().isNotEmpty) {
+      setState(() {
+        _userRepos = repos;
+        _isLoadingRepos = false;
+      });
       return;
     }
 
@@ -156,13 +260,20 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       await GitHubService.saveToken(input, result.username!);
       final savedRepo = await GitHubService.getSavedRepo();
       if (mounted) {
+        final keepManualPick =
+            _repoPickedByUser && (_selectedRepo ?? '').trim().isNotEmpty;
         setState(() {
           _savedToken = input;
           _username = result.username;
           _isVerifying = false;
-          _selectedRepo = savedRepo;
+          // A new token must not silently move the destination back to the
+          // previously saved repo when the user has already chosen one.
+          if (!keepManualPick) _selectedRepo = savedRepo;
         });
-        _fetchRepos(input, preferredRepo: savedRepo);
+        _fetchRepos(
+          input,
+          preferredRepo: keepManualPick ? _selectedRepo : savedRepo,
+        );
       }
     } else {
       if (mounted) {
@@ -188,58 +299,56 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       _username = null;
       _userRepos = [];
       _selectedRepo = null;
+      _repoPickedByUser = false;
     });
   }
 
   Future<void> _executePush() async {
     if (_savedToken == null || _username == null) return;
 
-    // Resolve the repository without ever asking the user to choose again.
-    // Order: the explicit new name -> current selection -> saved repo -> the
-    // only repo in the list. "Please select a repository" therefore only
-    // appears when there is genuinely nothing to pick.
-    String? targetRepo = _isCreateNew ? _newRepoController.text.trim() : _selectedRepo;
+    // What the user chose is final.
+    //
+    // This used to fall back to the *saved* repository whenever the selection
+    // looked empty, which meant a push could silently land in the previously
+    // used repo even though another one was selected on screen. There is no
+    // more fallback-to-saved: either the user picked something (dropdown or
+    // "Create New"), or the push stops and asks.
+    String? targetRepo;
+    if (_isCreateNew) {
+      targetRepo = _newRepoController.text.trim();
+    } else {
+      targetRepo = resolveTargetRepo(
+        selected: _selectedRepo,
+        available: _repoNames,
+        pickedByUser: _repoPickedByUser,
+      );
+    }
 
-    if (targetRepo == null || targetRepo.isEmpty) {
-      final saved = await GitHubService.getSavedRepo();
-      if (saved != null && saved.trim().isNotEmpty) {
-        targetRepo = saved.trim();
-      } else if (_userRepos.length == 1) {
-        targetRepo = _userRepos.first['name'] as String?;
+    if (targetRepo.isEmpty) {
+      if (mounted) {
+        setState(() => _isPushing = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Choose a repository first — nothing was pushed.'),
+            backgroundColor: Color(0xFFDC2626),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
       }
+      return;
     }
 
-    if (targetRepo == null || targetRepo.isEmpty) {
-      // Last resort: load the list once, synchronously, before giving up.
-      final refreshed = await GitHubService.getUserRepos(_savedToken!);
-      final first = refreshed.repos.isNotEmpty
-          ? refreshed.repos.first['name'] as String?
-          : null;
-      if (first != null && first.isNotEmpty) {
-        targetRepo = first;
-        if (mounted) setState(() => _selectedRepo = first);
-        widget.onLog('Using "$first" as the target repository.', LogLevel.info);
-      } else {
-        if (mounted) {
-          setState(() => _isPushing = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                refreshed.error ??
-                    'No repositories are available for this account yet.',
-              ),
-              backgroundColor: const Color(0xFFDC2626),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-        return;
-      }
+    // Never let the model and the screen disagree about the destination.
+    if (_selectedRepo != targetRepo && mounted) {
+      setState(() => _selectedRepo = targetRepo);
     }
 
-    if (_selectedRepo == null || _selectedRepo!.isEmpty) {
-      _selectedRepo = targetRepo;
-    }
+    // Say it once, loudly, before a single byte is uploaded.
+    widget.onLog(
+      'Pushing to repository: $targetRepo'
+      '${_isCreateNew ? ' (new)' : ''}',
+      LogLevel.info,
+    );
 
     // Pre-flight the workspace: pushing to a folder Android will not let us
     // read used to fail with a bare "No files found to push to GitHub".
@@ -634,6 +743,9 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
         if (_isCreateNew) ...[
           TextField(
             controller: _newRepoController,
+            // The destination banner and the button label both show this name,
+            // so they must refresh as it is typed.
+            onChanged: (_) => setState(() {}),
             style: const TextStyle(color: Colors.white, fontSize: 12.5),
             decoration: InputDecoration(
               labelText: 'Repository Name',
@@ -680,7 +792,11 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
             const Center(child: Padding(padding: EdgeInsets.all(8.0), child: CircularProgressIndicator(strokeWidth: 2)))
           else
             DropdownButtonFormField<String>(
-              value: _selectedRepo,
+              // DropdownButtonFormField throws if `value` is not one of `items`.
+              // A repo created this session, or one missing from a stale list,
+              // would otherwise crash the dialog. Validate it here and keep the
+              // choice as a pinned extra item so it stays visible AND selected.
+              value: _repoNames.contains(_selectedRepo) ? _selectedRepo : null,
               hint: Text(
                 _reposError != null
                     ? 'Could not load your repositories — tap Retry'
@@ -698,12 +814,13 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
                 fillColor: const Color(0xFF080C16),
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
               ),
-              items: _userRepos.map((r) {
-                return DropdownMenuItem<String>(
-                  value: r['name'],
-                  child: Text('${r['name']} ${r['private'] ? '🔒' : '🌐'}'),
-                );
-              }).toList(),
+              items: [
+                for (final name in _repoNames)
+                  DropdownMenuItem<String>(
+                    value: name,
+                    child: Text(_repoLabel(name)),
+                  ),
+              ],
               onChanged: (val) async {
                 if (val == null) return;
                 final match = _userRepos.firstWhere(
@@ -713,9 +830,11 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
                 final branch = (match['default_branch'] as String?) ?? 'main';
                 setState(() {
                   _selectedRepo = val;
+                  _repoPickedByUser = true;
                   _selectedRepoDefaultBranch = branch;
                   _branchController.text = branch;
                 });
+                widget.onLog('Target repository set to "$val".', LogLevel.info);
                 await GitHubService.saveRepo(val);
               },
             ),
@@ -732,6 +851,10 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
           ),
         ),
+        const SizedBox(height: 10),
+        // The destination, spelled out. If this ever disagrees with the
+        // dropdown, the push is blocked rather than guessing.
+        _destinationBanner(),
         const SizedBox(height: 10),
         TextField(
           controller: _commitController,
@@ -768,7 +891,10 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
             ),
             onPressed: _isPushing ? null : _executePush,
             icon: const Icon(Icons.cloud_upload_rounded, color: Colors.white, size: 18),
-            label: const Text('Push to GitHub', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            label: Text(
+              _pushDestinationLabel,
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            ),
           ),
         ),
       ],
