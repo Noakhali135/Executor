@@ -9,6 +9,7 @@ import 'package:executor/services/github_service.dart';
 import 'package:executor/services/saf_workspace.dart';
 import 'package:executor/services/push_progress.dart';
 import 'package:executor/services/workspace_fs.dart';
+import 'package:executor/services/workspace_text.dart';
 import 'package:executor/services/workspace_probe.dart';
 import 'package:executor/services/path_guard.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -108,6 +109,34 @@ void main() {
         expect(PathGuard.validateRelativePath(bad), isNotNull,
             reason: '"$bad" should be rejected');
       }
+    });
+  });
+
+  group('WorkspaceText', () {
+    test('encodes UTF-8, not UTF-16 code units', () {
+      const text = 'হ্যালো 🌍';
+      final bytes = WorkspaceText.encode(text);
+      expect(bytes, utf8.encode(text));
+      // UTF-16 would be 8 units; correct UTF-8 is longer for non-Latin text.
+      expect(bytes.length, isNot(text.codeUnits.length));
+    });
+
+    test('decodes a BOM away instead of putting it in the file', () {
+      final withBom = <int>[0xEF, 0xBB, 0xBF, ...utf8.encode('hello')];
+      expect(WorkspaceText.decode(withBom), 'hello');
+    });
+
+    test('decodes malformed bytes without throwing', () {
+      expect(() => WorkspaceText.decode([0x6F, 0x6B, 0xFF, 0xFE]),
+          returnsNormally);
+    });
+
+    test('saf_workspace does not import workspace_fs', () {
+      // workspace_fs imports saf_workspace, so the reverse import is a cycle.
+      // The shared codec lives in workspace_text.dart precisely to avoid it;
+      // this test fails loudly if someone re-introduces the cycle.
+      final source = File('lib/services/saf_workspace.dart').readAsStringSync();
+      expect(source, isNot(contains("import 'workspace_fs.dart'")));
     });
   });
 

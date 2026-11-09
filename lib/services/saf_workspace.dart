@@ -1,9 +1,10 @@
 import 'dart:io';
-import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
+
+import 'workspace_text.dart';
 
 /// A folder the user granted through the Storage Access Framework.
 class SafTree {
@@ -274,13 +275,13 @@ class SafWorkspace {
   /// the high byte of every character, so any non-Latin text was destroyed on
   /// save (Bengali became "¹Í¯¾²Ë", an emoji became a control character).
   static Future<bool> writeString(String path, String content) =>
-      writeFile(path, Uint8List.fromList(utf8.encode(content)));
+      writeFile(path, WorkspaceText.encode(content));
 
   /// Convenience for the explorer/editor: read a text file through SAF.
   static Future<String?> readString(String path) async {
     final bytes = await readFile(path);
     if (bytes == null) return null;
-    return WorkspaceFs.decodeText(bytes);
+    return WorkspaceText.decode(bytes);
   }
 
   /// Direct children of a folder, for the explorer tree.
