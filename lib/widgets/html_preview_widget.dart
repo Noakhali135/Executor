@@ -44,18 +44,19 @@ class HtmlPreviewWidget extends StatefulWidget {
 }
 
 class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
-  static const int _maxDiagnosticLines = 1200;
-  static const String _diagnosticChannelName = 'ExecutorPreviewDiagnostics';
-  static final RegExp _diagnosticUrlPattern = RegExp(
+  static const int _maxConsoleEvents = 1200;
+  static const String _consoleChannelName = 'ExecutorBrowserConsole';
+  static final RegExp _consoleUrlPattern = RegExp(
     r'''(?:(?:https?|file|content)://|(?:blob|data|javascript):)[^\s"'<>]+''',
     caseSensitive: false,
   );
 
-  final Queue<String> _diagnosticLines = ListQueue<String>();
+  final Queue<String> _consoleEvents = ListQueue<String>();
+  final ValueNotifier<int> _consoleRevision = ValueNotifier<int>(0);
   final WebViewController _webViewController = WebViewController();
   HttpServer? _localServer;
   int? _serverPort;
-  int _droppedDiagnosticLines = 0;
+  int _droppedConsoleEvents = 0;
   DateTime? _pageStartedAt;
   String? _lastObservedUrl;
   int _lastProgressLogged = -1;
@@ -64,16 +65,16 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
   @override
   void initState() {
     super.initState();
-    _record('INFO', 'preview session created');
+    _recordConsoleEvent('INFO', 'preview session created');
     unawaited(_initializePreview());
   }
 
   Future<void> _initializePreview() async {
     try {
       await _initWebViewController();
-      _record('INFO', 'WebView configured: JavaScript=unrestricted, canvas=white');
+      _recordConsoleEvent('INFO', 'WebView configured: JavaScript=unrestricted, canvas=white');
     } catch (error, stackTrace) {
-      _record('ERROR', 'WebView navigation setup failed: $error; stack=$stackTrace');
+      _recordConsoleEvent('ERROR', 'WebView navigation setup failed: $error; stack=$stackTrace');
       return;
     }
     if (!mounted) return;
@@ -84,34 +85,34 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
     try {
       await _webViewController.setJavaScriptMode(JavaScriptMode.unrestricted);
     } catch (error, stackTrace) {
-      _record('ERROR', 'setting JavaScript mode failed: $error; $stackTrace');
+      _recordConsoleEvent('ERROR', 'setting JavaScript mode failed: $error; $stackTrace');
     }
     try {
       await _webViewController.setBackgroundColor(Colors.white);
     } catch (error, stackTrace) {
-      _record('WARN', 'setting WebView canvas failed: $error; $stackTrace');
+      _recordConsoleEvent('WARN', 'setting WebView canvas failed: $error; $stackTrace');
     }
     try {
       await _webViewController.addJavaScriptChannel(
-        _diagnosticChannelName,
-        onMessageReceived: _onPageDiagnosticMessage,
+        _consoleChannelName,
+        onMessageReceived: _onPageConsoleMessage,
       );
-      _record('INFO', 'JavaScript diagnostic channel installed');
+      _recordConsoleEvent('INFO', 'browser console bridge installed');
     } catch (error, stackTrace) {
-      _record('WARN', 'JavaScript diagnostic channel failed: $error; $stackTrace');
+      _recordConsoleEvent('WARN', 'browser console bridge failed: $error; $stackTrace');
     }
     try {
       await _webViewController.setOnConsoleMessage(_onConsoleMessage);
-      _record('INFO', 'JavaScript console capture installed');
+      _recordConsoleEvent('INFO', 'JavaScript console capture installed');
     } catch (error, stackTrace) {
-      _record('WARN', 'JavaScript console capture failed: $error; $stackTrace');
+      _recordConsoleEvent('WARN', 'JavaScript console capture failed: $error; $stackTrace');
     }
     await _webViewController.setNavigationDelegate(
       NavigationDelegate(
         onNavigationRequest: (NavigationRequest request) {
           final uri = Uri.tryParse(request.url);
           if (uri == null) {
-            _record(
+            _recordConsoleEvent(
               'WARN',
               'navigation prevented: malformed URL main=${request.isMainFrame}',
             );
@@ -130,7 +131,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
               : isEmbeddedWebDocument;
           final frame = request.isMainFrame ? 'main-frame' : 'subframe';
           final decision = allowed ? 'allowed' : 'blocked';
-          _record(
+          _recordConsoleEvent(
             allowed ? 'INFO' : 'WARN',
             'navigation $frame $decision ${_safeUrl(request.url)}',
           );
@@ -139,7 +140,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
         onPageStarted: (String url) {
           _pageStartedAt = DateTime.now();
           _lastObservedUrl = url;
-          _record('INFO', 'page started ${_safeUrl(url)}');
+          _recordConsoleEvent('INFO', 'page started ${_safeUrl(url)}');
           if (mounted) setState(() => _isLoadingWeb = true);
         },
         onPageFinished: (String url) {
@@ -148,7 +149,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
               : '${DateTime.now().difference(_pageStartedAt!).inMilliseconds}ms';
           _pageStartedAt = null;
           _lastObservedUrl = url;
-          _record('INFO', 'page finished ${_safeUrl(url)} elapsed=$elapsed');
+          _recordConsoleEvent('INFO', 'page finished ${_safeUrl(url)} elapsed=$elapsed');
           if (mounted) setState(() => _isLoadingWeb = false);
           unawaited(_capturePageSnapshot());
         },
@@ -156,17 +157,17 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
           if (progress != _lastProgressLogged &&
               (progress == 0 || progress == 100 || progress % 20 == 0)) {
             _lastProgressLogged = progress;
-            _record('INFO', 'WebView load progress=$progress%');
+            _recordConsoleEvent('INFO', 'WebView load progress=$progress%');
           }
         },
         onUrlChange: (UrlChange change) {
           final url = change.url;
           if (url == null) return;
           _lastObservedUrl = url;
-          _record('INFO', 'WebView URL changed ${_safeUrl(url)}');
+          _recordConsoleEvent('INFO', 'WebView URL changed ${_safeUrl(url)}');
         },
         onWebResourceError: (WebResourceError error) {
-          _record(
+          _recordConsoleEvent(
             'ERROR',
             'WebResourceError code=${error.errorCode} type=${error.errorType} '
                 'mainFrame=${error.isForMainFrame} '
@@ -193,7 +194,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
               }
             }
           }
-          _record(
+          _recordConsoleEvent(
             'ERROR',
             'HTTP error status=$status url=$resource contentType=$contentType',
           );
@@ -214,29 +215,30 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
     return _isLoopbackHost(hostOnly.replaceAll('[', '').replaceAll(']', ''));
   }
 
-  void _record(String level, String message) {
+  void _recordConsoleEvent(String level, String message) {
     final now = DateTime.now();
     String twoDigits(int value) => value.toString().padLeft(2, '0');
     final timestamp =
         '${twoDigits(now.hour)}:${twoDigits(now.minute)}:${twoDigits(now.second)}';
-    final sanitized = _sanitizeDiagnosticText(message);
+    final sanitized = _sanitizeConsoleText(message);
     final singleLine = sanitized.replaceAll(RegExp(r'[\r\n\t]+'), ' ').trim();
     final limited = singleLine.length > 1800
         ? '${singleLine.substring(0, 1800)} [line truncated]'
         : singleLine;
-    if (_diagnosticLines.length >= _maxDiagnosticLines) {
-      _diagnosticLines.removeFirst();
-      _droppedDiagnosticLines++;
+    if (_consoleEvents.length >= _maxConsoleEvents) {
+      _consoleEvents.removeFirst();
+      _droppedConsoleEvents++;
     }
-    _diagnosticLines.addLast('[$timestamp] $level $limited');
+    _consoleEvents.addLast('[$timestamp] $level $limited');
+    if (mounted) _consoleRevision.value++;
   }
 
-  String _sanitizeDiagnosticText(String message) {
+  String _sanitizeConsoleText(String message) {
     var sanitized = message;
     for (final root in {widget.baseDir, PathGuard.normalizeRoot(widget.baseDir)}) {
       if (root.length > 1) sanitized = sanitized.replaceAll(root, '<workspace>');
     }
-    sanitized = sanitized.replaceAllMapped(_diagnosticUrlPattern, (match) {
+    sanitized = sanitized.replaceAllMapped(_consoleUrlPattern, (match) {
       return _safeUrl(match.group(0)!);
     });
     return sanitized;
@@ -261,45 +263,21 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
     return '${uri.scheme}://$host$port${uri.path}';
   }
 
-  String _diagnosticReport() {
-    final workspaceType = WorkspaceFs.isSaf(widget.baseDir)
-        ? 'SAF virtual workspace'
-        : 'ordinary filesystem workspace';
-    final previewUri = _previewUri;
-    final previewUrl = previewUri == null
-        ? '(server not running)'
-        : _safeUrl(previewUri.toString());
-    final lastUrl = _lastObservedUrl == null
-        ? '(none)'
-        : _safeUrl(_lastObservedUrl!);
-    final runtimeVersion = Platform.version.split(' ').first;
-    final htmlBytes = utf8.encode(widget.htmlContent).length;
-    final networkPolicy = Platform.isAndroid
-        ? 'Android INTERNET permission; system-trusted HTTPS; cleartext allowed only to loopback'
-        : 'Android network security config is not active on ${Platform.operatingSystem}';
-    final externalHttpPolicy = Platform.isAndroid
-        ? 'cleartext HTTP blocked except loopback'
-        : 'OS-specific policy; not assessed by this Android config';
-    final lines = <String>[
-      'HTML Render diagnostic report',
-      'Captured: ${DateTime.now().toIso8601String()}',
-      'OS: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
-      'Dart runtime: $runtimeVersion',
-      'Entry file: ${widget.fileName}',
-      'Workspace type: $workspaceType (full local path omitted)',
-      'Preview URL: $previewUrl',
-      'Last observed URL: $lastUrl',
-      'HTML size: $htmlBytes UTF-8 bytes; content is not included',
-      'WebView: JavaScript unrestricted; canvas white; console capture installed before load; DOM snapshot/error hooks injected after page finish',
-      'Network policy: $networkPolicy',
-      'External HTTP resources: $externalHttpPolicy',
-      'Log buffer: ${_diagnosticLines.length} lines retained (each capped at 1800 characters); $_droppedDiagnosticLines older lines dropped',
-      'Privacy: HTML source, cookies and request bodies are not intentionally dumped. Recognized URLs omit queries/fragments; workspace paths and local file URLs are redacted. Page title/console/error text may still contain project data or secrets; review before sharing.',
-      'Logs are in memory only and are lost when the preview route closes.',
-      '--- chronological events ---',
-      ..._diagnosticLines,
-    ];
-    return lines.join('\n');
+  bool _isProblemEvent(String line) =>
+      line.contains(' ERROR ') ||
+      line.contains(' WARN ') ||
+      line.contains('JS-ERROR') ||
+      line.contains('JS-WARN');
+
+  Color _consoleEventColor(String line) {
+    if (line.contains(' ERROR ') || line.contains('JS-ERROR')) {
+      return const Color(0xFFFCA5A5);
+    }
+    if (line.contains(' WARN ') || line.contains('JS-WARN')) {
+      return const Color(0xFFFCD34D);
+    }
+    if (line.contains('JS-')) return const Color(0xFF7DD3FC);
+    return const Color(0xFFE2E8F0);
   }
 
   void _onConsoleMessage(JavaScriptConsoleMessage message) {
@@ -310,19 +288,19 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
         : lowerLevel.contains('warning')
         ? 'WARN'
         : 'INFO';
-    _record('JS-$level', 'console[$levelText] ${message.message}');
+    _recordConsoleEvent('JS-$level', 'console[$levelText] ${message.message}');
   }
 
-  void _onPageDiagnosticMessage(JavaScriptMessage message) {
+  void _onPageConsoleMessage(JavaScriptMessage message) {
     try {
       final decoded = jsonDecode(message.message);
       if (decoded is! Map) {
-        _record('JS-INFO', 'page diagnostic ${message.message}');
+        _recordConsoleEvent('JS-INFO', 'page console event ${message.message}');
         return;
       }
       final kind = decoded['kind']?.toString() ?? 'unknown';
       if (kind == 'snapshot') {
-        _record(
+        _recordConsoleEvent(
           'INFO',
           'DOM snapshot url=${decoded['url']} title=${decoded['title']} '
               'ua=${decoded['userAgent']} compat=${decoded['compatMode']} '
@@ -344,24 +322,24 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
         _recordSnapshotList(decoded['stylesheets'], 'stylesheet');
         _recordSnapshotList(decoded['resources'], 'resource timing');
       } else if (kind == 'resource-error') {
-        _record(
+        _recordConsoleEvent(
           'ERROR',
           'DOM resource error tag=${decoded['tag']} url=${decoded['url']}',
         );
       } else if (kind == 'script-error') {
-        _record(
+        _recordConsoleEvent(
           'ERROR',
           'JavaScript runtime error message=${decoded['message']} '
               'source=${decoded['source']} line=${decoded['line']} '
               'column=${decoded['column']} stack=${decoded['stack']}',
         );
       } else if (kind == 'unhandled-rejection') {
-        _record('ERROR', 'JavaScript unhandled rejection: ${decoded['reason']}');
+        _recordConsoleEvent('ERROR', 'JavaScript unhandled rejection: ${decoded['reason']}');
       } else {
-        _record('JS-INFO', 'page diagnostic kind=$kind data=$decoded');
+        _recordConsoleEvent('JS-INFO', 'page console event kind=$kind data=$decoded');
       }
     } catch (error) {
-      _record('WARN', 'could not parse page diagnostic: $error; ${message.message}');
+      _recordConsoleEvent('WARN', 'could not parse browser console event: $error; ${message.message}');
     }
   }
 
@@ -369,7 +347,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
     if (value is! List) return;
     for (final item in value) {
       if (item is Map) {
-        _record(
+        _recordConsoleEvent(
           'INFO',
           '$label ${item.entries.map((entry) => '${entry.key}=${entry.value}').join(' ')}',
         );
@@ -395,7 +373,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
         }
       };
       const post = (value) =>
-        ExecutorPreviewDiagnostics.postMessage(JSON.stringify(value));
+        ExecutorBrowserConsole.postMessage(JSON.stringify(value));
       const references = Array.from(document.querySelectorAll(
         'link[href],script[src],img[src],iframe[src],source[src],audio[src],video[src]'
       )).slice(0, 120).map((element) => {
@@ -507,20 +485,20 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
     })();''';
     try {
       await _webViewController.runJavaScript(script);
-      _record('INFO', 'page resource/style snapshot and runtime error hooks injected');
+      _recordConsoleEvent('INFO', 'page resource/style snapshot and runtime error hooks injected');
     } catch (error) {
-      _record('WARN', 'page snapshot injection failed: $error');
+      _recordConsoleEvent('WARN', 'page snapshot injection failed: $error');
     }
   }
 
   Future<void> _startLocalServerAndLoad() async {
-    _record(
+    _recordConsoleEvent(
       'INFO',
       'entry=${widget.fileName} workspace=' +
           (WorkspaceFs.isSaf(widget.baseDir) ? 'SAF' : 'filesystem') +
           ' htmlBytes=${utf8.encode(widget.htmlContent).length}',
     );
-    _record(
+    _recordConsoleEvent(
       'INFO',
       Platform.isAndroid
           ? 'Android network policy: INTERNET permission is declared; HTTPS uses system trust; external cleartext HTTP is blocked; loopback HTTP is allowed'
@@ -544,12 +522,12 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
           unawaited(_servePreviewRequest(request, root));
         },
         onError: (Object error, StackTrace stackTrace) {
-          _record('ERROR', 'HTTP server stream error: $error; $stackTrace');
+          _recordConsoleEvent('ERROR', 'HTTP server stream error: $error; $stackTrace');
         },
       );
 
       localUrl = 'http://127.0.0.1:${boundServer.port}/';
-      _record(
+      _recordConsoleEvent(
         'INFO',
         'loopback server listening at $localUrl rootType=${WorkspaceFs.isSaf(root) ? 'SAF' : 'filesystem'}',
       );
@@ -557,29 +535,29 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
       await server?.close(force: true);
       _localServer = null;
       _serverPort = null;
-      _record('ERROR', 'loopback server startup failed: $error; $stackTrace');
+      _recordConsoleEvent('ERROR', 'loopback server startup failed: $error; $stackTrace');
     }
 
     if (localUrl == null) {
-      _record(
+      _recordConsoleEvent(
         'WARN',
         'loading HTML string fallback without a local asset server; relative local assets cannot be served',
       );
       try {
         await _webViewController.loadHtmlString(widget.htmlContent);
       } catch (error, stackTrace) {
-        _record('ERROR', 'HTML string fallback failed: $error; $stackTrace');
+        _recordConsoleEvent('ERROR', 'HTML string fallback failed: $error; $stackTrace');
       }
       if (mounted) setState(() {});
       return;
     }
 
     try {
-      _record('INFO', 'calling WebView loadRequest for ${_safeUrl(localUrl)}');
+      _recordConsoleEvent('INFO', 'calling WebView loadRequest for ${_safeUrl(localUrl)}');
       await _webViewController.loadRequest(Uri.parse(localUrl));
-      _record('INFO', 'WebView loadRequest returned without a platform exception');
+      _recordConsoleEvent('INFO', 'WebView loadRequest returned without a platform exception');
     } catch (error, stackTrace) {
-      _record(
+      _recordConsoleEvent(
         'ERROR',
         'local URL loadRequest threw: $error; $stackTrace; retry with baseUrl',
       );
@@ -588,9 +566,9 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
           widget.htmlContent,
           baseUrl: localUrl,
         );
-        _record('INFO', 'HTML string retry loaded with loopback baseUrl');
+        _recordConsoleEvent('INFO', 'HTML string retry loaded with loopback baseUrl');
       } catch (fallbackError, fallbackStackTrace) {
-        _record(
+        _recordConsoleEvent(
           'ERROR',
           'HTML string retry failed: $fallbackError; $fallbackStackTrace',
         );
@@ -606,7 +584,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
     final accept = request.headers.value(HttpHeaders.acceptHeader) ?? '(missing)';
     final userAgent = request.headers.value(HttpHeaders.userAgentHeader) ?? '(missing)';
     final referer = request.headers.value(HttpHeaders.refererHeader);
-    _record(
+    _recordConsoleEvent(
       'INFO',
       'local request ${request.method} $requestPath host=$host queryPresent=${request.uri.hasQuery} '
           'accept=$accept userAgent=$userAgent referer=${referer == null ? '(none)' : _safeUrl(referer)}',
@@ -828,7 +806,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
         source: 'filesystem stream',
       );
     } catch (error, stackTrace) {
-      _record(
+      _recordConsoleEvent(
         'ERROR',
         'local request exception method=${request.method} path=$requestPath '
             'error=$error stack=$stackTrace',
@@ -842,7 +820,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
           reason: 'exception while resolving or streaming asset',
         );
       } catch (responseError, responseStackTrace) {
-        _record(
+        _recordConsoleEvent(
           'ERROR',
           'could not send local error response: $responseError; $responseStackTrace',
         );
@@ -917,7 +895,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
   }) {
     final elapsed = DateTime.now().difference(startedAt).inMilliseconds;
     final byteCount = bytes < 0 ? 'unknown' : bytes.toString();
-    _record(
+    _recordConsoleEvent(
       statusCode >= 400 ? 'WARN' : 'INFO',
       'local response ${request.method} ${request.uri.path} status=$statusCode '
           'type=$contentType bytes=$byteCount elapsed=${elapsed}ms source=$source',
@@ -997,7 +975,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
   void didUpdateWidget(covariant HtmlPreviewWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.htmlContent != widget.htmlContent) {
-      _record('INFO', 'widget received new HTML content; refreshing preview');
+      _recordConsoleEvent('INFO', 'widget received new HTML content; refreshing preview');
       unawaited(_reloadPage());
     }
   }
@@ -1005,6 +983,7 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
   @override
   void dispose() {
     _localServer?.close(force: true);
+    _consoleRevision.dispose();
     super.dispose();
   }
 
@@ -1020,32 +999,59 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
     );
   }
 
-  Future<void> _showDiagnostics() async {
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) {
-          final report = _diagnosticReport();
-          return AlertDialog(
+  Future<void> _showBrowserConsole() async {
+    var problemsOnly = false;
+    final scrollController = ScrollController();
+
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
             backgroundColor: const Color(0xFF0F1523),
             title: const Row(
               children: [
-                Icon(Icons.bug_report_outlined, color: Color(0xFFFBBF24)),
+                Icon(Icons.terminal, color: Color(0xFF38BDF8)),
                 SizedBox(width: 8),
-                Text('Render diagnostics'),
+                Text('Browser console'),
               ],
             ),
             content: SizedBox(
               width: double.maxFinite,
-              height: MediaQuery.sizeOf(context).height * 0.62,
+              height: MediaQuery.sizeOf(context).height * 0.68,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text(
-                    'Copy the report and paste it here. Review page console lines before sharing; they may contain project data.',
-                    style: TextStyle(color: Color(0xFFCBD5E1), fontSize: 12),
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Live WebView events',
+                          style: TextStyle(color: Color(0xFFCBD5E1), fontSize: 12),
+                        ),
+                      ),
+                      FilterChip(
+                        label: const Text('All'),
+                        selected: !problemsOnly,
+                        visualDensity: VisualDensity.compact,
+                        onSelected: (_) => setDialogState(() => problemsOnly = false),
+                      ),
+                      const SizedBox(width: 4),
+                      FilterChip(
+                        label: const Text('Problems'),
+                        selected: problemsOnly,
+                        visualDensity: VisualDensity.compact,
+                        onSelected: (_) => setDialogState(() => problemsOnly = true),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 8),
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 6),
+                    child: Text(
+                      'Page console messages may contain project data.',
+                      style: TextStyle(color: Color(0xFF64748B), fontSize: 11),
+                    ),
+                  ),
                   Expanded(
                     child: Container(
                       padding: const EdgeInsets.all(8),
@@ -1054,16 +1060,61 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
                         borderRadius: BorderRadius.circular(6),
                         border: Border.all(color: const Color(0xFF334155)),
                       ),
-                      child: SingleChildScrollView(
-                        child: SelectableText(
-                          report,
-                          style: const TextStyle(
-                            color: Color(0xFFE2E8F0),
-                            fontFamily: 'monospace',
-                            fontSize: 10,
-                          ),
-                        ),
+                      child: AnimatedBuilder(
+                        animation: _consoleRevision,
+                        builder: (context, _) {
+                          final entries = _consoleEvents
+                              .where((line) => !problemsOnly || _isProblemEvent(line))
+                              .toList(growable: false);
+                          final shouldFollow =
+                              !scrollController.hasClients ||
+                              !scrollController.position.hasContentDimensions ||
+                              scrollController.position.extentAfter < 48;
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (shouldFollow && scrollController.hasClients) {
+                              scrollController.jumpTo(
+                                scrollController.position.maxScrollExtent,
+                              );
+                            }
+                          });
+
+                          if (entries.isEmpty) {
+                            return Center(
+                              child: Text(
+                                problemsOnly
+                                    ? 'No warnings or errors yet.'
+                                    : 'No browser events yet.',
+                                style: const TextStyle(color: Color(0xFF64748B)),
+                              ),
+                            );
+                          }
+
+                          return ListView.builder(
+                            controller: scrollController,
+                            itemCount: entries.length,
+                            itemBuilder: (context, index) => Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 2),
+                              child: SelectableText(
+                                entries[index],
+                                style: TextStyle(
+                                  color: _consoleEventColor(entries[index]),
+                                  fontFamily: 'monospace',
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ),
+                          );
+                        },
                       ),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  AnimatedBuilder(
+                    animation: _consoleRevision,
+                    builder: (context, _) => Text(
+                      '${_consoleEvents.length} events'
+                      '${_droppedConsoleEvents == 0 ? '' : ' · $_droppedConsoleEvents older events dropped'}',
+                      style: const TextStyle(color: Color(0xFF64748B), fontSize: 11),
                     ),
                   ),
                 ],
@@ -1072,61 +1123,53 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
             actions: [
               TextButton(
                 onPressed: () {
-                  _diagnosticLines.clear();
-                  _droppedDiagnosticLines = 0;
-                  _record('INFO', 'diagnostic buffer cleared; reloading page');
-                  unawaited(_reloadPage());
-                  setDialogState(() {});
+                  _consoleEvents.clear();
+                  _droppedConsoleEvents = 0;
+                  _recordConsoleEvent('INFO', 'browser console cleared');
                 },
-                child: const Text('Clear & reload'),
+                child: const Text('Clear'),
               ),
               TextButton(
-                onPressed: () => setDialogState(() {}),
-                child: const Text('Refresh log'),
-              ),
-              FilledButton.icon(
                 onPressed: () async {
-                  _record('INFO', 'diagnostic report copy requested');
+                  final entries = _consoleEvents
+                      .where((line) => !problemsOnly || _isProblemEvent(line))
+                      .toList(growable: false);
+                  if (entries.isEmpty) return;
                   try {
                     await Clipboard.setData(
-                      ClipboardData(text: _diagnosticReport()),
+                      ClipboardData(text: entries.join('\n')),
                     );
-                    _record('INFO', 'diagnostic report copied to clipboard');
                     if (mounted) {
                       ScaffoldMessenger.of(this.context).showSnackBar(
                         const SnackBar(
-                          content: Text('Render diagnostic report copied'),
+                          content: Text('Browser console copied'),
                           behavior: SnackBarBehavior.floating,
                         ),
                       );
                     }
                   } catch (error, stackTrace) {
-                    _record('ERROR', 'copying diagnostic report failed: $error; $stackTrace');
-                    if (mounted) {
-                      ScaffoldMessenger.of(this.context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Could not copy render diagnostics'),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                    }
+                    _recordConsoleEvent('ERROR', 'copying browser console failed: $error; $stackTrace');
                   }
-                  if (dialogContext.mounted) setDialogState(() {});
                 },
-                icon: const Icon(Icons.copy_rounded, size: 16),
-                label: const Text('Copy all'),
+                child: const Text('Copy console'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Done'),
               ),
             ],
-          );
-        },
-      ),
-    );
+          ),
+        ),
+      );
+    } finally {
+      scrollController.dispose();
+    }
   }
 
   Future<void> _copyServerUrl() async {
     final uri = _previewUri;
     if (uri == null) return;
-    _record('INFO', 'preview URL copied ${_safeUrl(uri.toString())}');
+    _recordConsoleEvent('INFO', 'preview URL copied ${_safeUrl(uri.toString())}');
     await Clipboard.setData(ClipboardData(text: uri.toString()));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1146,13 +1189,13 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
       return;
     }
 
-    _record('INFO', 'external browser launch requested ${_safeUrl(uri.toString())}');
+    _recordConsoleEvent('INFO', 'external browser launch requested ${_safeUrl(uri.toString())}');
     try {
       final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      _record('INFO', 'external browser launch result=$opened');
+      _recordConsoleEvent('INFO', 'external browser launch result=$opened');
       if (!opened) _showBrowserError('Could not open the preview in a browser.');
     } catch (error, stackTrace) {
-      _record('ERROR', 'external browser launch failed: $error; $stackTrace');
+      _recordConsoleEvent('ERROR', 'external browser launch failed: $error; $stackTrace');
       _showBrowserError('Could not open the preview in a browser.');
     }
   }
@@ -1169,16 +1212,16 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
   }
 
   Future<void> _reloadPage() async {
-    _record('INFO', 'refresh requested');
+    _recordConsoleEvent('INFO', 'refresh requested');
     try {
       if (_serverPort != null) {
         await _webViewController.reload();
       } else {
-        _record('WARN', 'no local server; refreshing HTML string without local assets');
+        _recordConsoleEvent('WARN', 'no local server; refreshing HTML string without local assets');
         await _webViewController.loadHtmlString(widget.htmlContent);
       }
     } catch (error, stackTrace) {
-      _record('ERROR', 'refresh failed: $error; $stackTrace');
+      _recordConsoleEvent('ERROR', 'refresh failed: $error; $stackTrace');
     }
   }
 
@@ -1219,16 +1262,16 @@ class _HtmlPreviewWidgetState extends State<HtmlPreviewWidget> {
               ),
               const SizedBox(width: 6),
               Tooltip(
-                message: 'Render diagnostics (${_diagnosticLines.length} events)',
+                message: 'Open browser console',
                 child: InkWell(
-                  onTap: _showDiagnostics,
+                  onTap: _showBrowserConsole,
                   borderRadius: BorderRadius.circular(6),
                   child: const Padding(
                     padding: EdgeInsets.all(5),
                     child: Icon(
-                      Icons.bug_report_outlined,
-                      size: 16,
-                      color: Color(0xFFFBBF24),
+                      Icons.terminal,
+                      size: 17,
+                      color: Color(0xFF38BDF8),
                     ),
                   ),
                 ),
