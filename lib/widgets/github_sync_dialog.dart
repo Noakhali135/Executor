@@ -90,6 +90,10 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
   /// Branch names known for the selected repository, default branch first.
   List<String> _branches = const [];
 
+  /// Guards the "repository selected" log so the same repo is not announced
+  /// three times (open, list refresh, branch load).
+  String? _announcedRepo;
+
   /// True once the user picked or typed a branch by hand.
   bool _branchPickedByUser = false;
 
@@ -149,10 +153,16 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       _dropdownEpoch++;
     });
 
-    widget.onLog(
-      'Repository "$repo" selected — target branch "${_branchController.text}".',
-      LogLevel.info,
-    );
+    // Say it once per repository; the same repo is loaded on open, on list
+    // refresh and when branches arrive.
+    if (_announcedRepo?.toLowerCase() != repo.toLowerCase()) {
+      _announcedRepo = repo;
+      widget.onLog(
+        'Repository "$repo" selected — target branch "${_branchController.text}" '
+        '(${_branches.length} branch(es)).',
+        LogLevel.info,
+      );
+    }
   }
 
   /// Names available in the dropdown: the fetched list plus the selection
@@ -922,6 +932,7 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
                   _branchPickedByUser = false;
                   _dropdownEpoch++;
                 });
+                _announcedRepo = null;
                 widget.onLog('Target repository set to "$val".', LogLevel.info);
                 await GitHubService.saveRepo(val);
 

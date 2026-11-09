@@ -1218,10 +1218,12 @@ class GitHubService {
           // 401s would all be identical and the real problem is one token.
           if (authFailure != null || cancelRequested) return;
           int reserved = 0;
+          var estimatedBytes = 0;
           try {
             // Reserve before reading so concurrency and file size cannot
             // combine into an out-of-memory kill.
             final length = await item.file.length();
+            estimatedBytes = item.file.size >= 0 ? item.file.size : length;
             if (length > maxBlobBytes) {
               failedFiles.add(item.relPath);
               return;
@@ -1264,6 +1266,9 @@ class GitHubService {
                 'sha': blobSha,
               });
               uploadedBytesCounter += bytes.length;
+              // Correct the estimate with the true size, so the progress line
+              // and the final stats cannot disagree with what was sent.
+              totalUploadBytes += bytes.length - estimatedBytes;
             } else {
               // Record the failure; the commit is aborted below rather than
               // producing a "successful" push with files silently missing.
