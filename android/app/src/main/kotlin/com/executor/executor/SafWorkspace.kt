@@ -38,6 +38,8 @@ class SafWorkspace(private val activity: Activity) {
             ".vscode", "__pycache__", ".venv", "venv", "Pods", ".next", ".cache"
         )
 
+        private const val CACHE_LIMIT = 20000
+
         const val VIRTUAL_ROOT = "/devrunner-saf"
         private const val REQUEST_OPEN_TREE = 0x5AF1
         private const val PREFS = "devrunner_saf"
@@ -125,6 +127,40 @@ class SafWorkspace(private val activity: Activity) {
         }
     }
 
+    /**
+     * File path -> DocumentFile, filled by the tree walk.
+     *
+     * The walk already holds a DocumentFile for every entry, but it used to be
+     * thrown away and every later operation (hashing, reading) re-derived it
+     * from the path with `findFile()` per segment. Each of those is a provider
+     * query that lists the whole parent directory, so hashing a project cost
+     * one directory listing per file per level. Caching turns that back into
+     * the single listing the walk already paid for.
+     *
+     * Entries are dropped by [invalidateCache] on write/delete/create, and the
+     * cache is bounded so a huge project cannot pin memory.
+     */
+    private val documentCache = HashMap<String, DocumentFile>()
+    private val documentCacheLock = Any()
+
+    private fun remember(path: String, doc: DocumentFile) {
+        synchronized(documentCacheLock) {
+            if (documentCache.size >= CACHE_LIMIT) documentCache.clear()
+            documentCache[path] = doc
+        }
+    }
+
+    private fun recall(path: String): DocumentFile? =
+        synchronized(documentCacheLock) { documentCache[path] }
+
+    /** Forgets cached handles below [path] after the tree changed. */
+    private fun invalidateCache(path: String) {
+        synchronized(documentCacheLock) {
+            val prefix = if (path.endsWith("/")) path else "$path/"
+            documentCache.keys.removeAll { it == path || it.startsWith(prefix) }
+        }
+    }
+
     @Volatile
     private var cancelled = false
 
@@ -196,6 +232,10 @@ class SafWorkspace(private val activity: Activity) {
     /** Resolves a virtual path to a DocumentFile, or null when not granted. */
     fun resolve(virtualPath: String): DocumentFile? {
         if (!virtualPath.startsWith("$VIRTUAL_ROOT/")) return null
+
+        // Fast path: the tree walk already handed us this exact handle.
+        recall(virtualPath)?.let { return it }
+
         val rest = virtualPath.removePrefix("$VIRTUAL_ROOT/")
         val segment = rest.substringBefore('/')
         val relative = rest.substringAfter('/', "")
@@ -205,9 +245,14 @@ class SafWorkspace(private val activity: Activity) {
         var current = DocumentFile.fromTreeUri(context, uri) ?: return null
         if (relative.isEmpty()) return current
 
-        for (segment in relative.split('/')) {
-            if (segment.isEmpty() || segment == "." || segment == "..") return null
-            val next = current.findFile(segment) ?: return null
+        val parts = relative.split('/').filter { it.isNotEmpty() }
+        for ((index, part) in parts.withIndex()) {
+            if (part == "." || part == "..") return null
+            // Cache keys are the full virtual path (that is what the walk
+            // stored), so rebuild it as we descend. A hit here skips a
+            // findFile() - and findFile() lists the entire parent directory.
+            val key = "$VIRTUAL_ROOT/$segment/" + parts.subList(0, index + 1).joinToString("/")
+            val next = recall(key) ?: current.findFile(part) ?: return null
             current = next
         }
         return current
@@ -253,11 +298,13 @@ class SafWorkspace(private val activity: Activity) {
                 val path = if (prefix.isEmpty()) "${virtualPath}/${name}" else "$prefix/${name}"
                 if (child.isDirectory) {
                     if (name in IGNORED_DIRS) continue
+                    remember(path, child)
                     walk(child, path, depth + 1)
                 } else {
-                    // length() is a ContentProvider query per file. Report
-                    // "unknown" here and let the caller ask only when it needs
-                    // the size; the walk itself must stay cheap.
+                    // length() is a ContentProvider query per file, and so is
+                    // every later lookup of this path. Report "unknown" size and
+                    // keep the handle the walk already has.
+                    remember(path, child)
                     out.add(
                         mapOf<String, Any>(
                             "path" to path,
@@ -318,66 +365,32 @@ class SafWorkspace(private val activity: Activity) {
      */
     private fun blobSha(file: DocumentFile): String? {
         val uri = file.uri
-        var length = file.length()
+        val declared = file.length()
 
-        // Some providers report -1 or 0 for a non-empty file. Git hashes the
-        // header with the true length, so measuring it is mandatory: a wrong
-        // header would make the file look changed on every single push.
-        if (length < 0) {
-            length = countBytes(uri) ?: return null
-        }
-
-        val digest = java.security.MessageDigest.getInstance("SHA-1")
-        digest.update("blob $length\u0000".toByteArray(Charsets.UTF_8))
-
-        val opened = context.contentResolver.openInputStream(uri) ?: return null
+        // Git's id is sha1("blob <len>\0" + content), so the length must be
+        // right. Rather than trusting the provider (some report -1 or 0) and
+        // possibly re-reading the whole file to recover, measure while hashing
+        // and fix the header from the buffer if it disagreed.
+        val buffer = java.io.ByteArrayOutputStream()
         var actual = 0L
+        val opened = context.contentResolver.openInputStream(uri) ?: return null
         opened.use { input ->
-            val buffer = ByteArray(64 * 1024)
+            val chunk = ByteArray(64 * 1024)
             while (true) {
                 if (cancelled) return null
-                val read = input.read(buffer)
+                val read = input.read(chunk)
                 if (read <= 0) break
-                digest.update(buffer, 0, read)
+                buffer.write(chunk, 0, read)
                 actual += read
             }
         }
 
-        // If the provider lied about the length, the digest is still valid but
-        // the header is not: hash again with the measured size.
-        if (actual != length) {
-            val retry = java.security.MessageDigest.getInstance("SHA-1")
-            retry.update("blob $actual\u0000".toByteArray(Charsets.UTF_8))
-            val reopened = context.contentResolver.openInputStream(uri) ?: return null
-            reopened.use { input ->
-                val buffer = ByteArray(64 * 1024)
-                while (true) {
-                    if (cancelled) return null
-                    val read = input.read(buffer)
-                    if (read <= 0) break
-                    retry.update(buffer, 0, read)
-                }
-            }
-            return retry.digest().joinToString("") { "%02x".format(it) }
-        }
-
+        val length = if (declared >= 0 && declared == actual) declared else actual
+        val digest = java.security.MessageDigest.getInstance("SHA-1")
+        digest.update("blob $length\u0000".toByteArray(Charsets.UTF_8))
+        digest.update(buffer.toByteArray())
+        buffer.reset()
         return digest.digest().joinToString("") { "%02x".format(it) }
-    }
-
-    /** Streams [uri] once just to measure it, for providers with no length. */
-    private fun countBytes(uri: android.net.Uri): Long? {
-        val input = context.contentResolver.openInputStream(uri) ?: return null
-        var total = 0L
-        input.use { stream ->
-            val buffer = ByteArray(64 * 1024)
-            while (true) {
-                if (cancelled) return null
-                val read = stream.read(buffer)
-                if (read <= 0) break
-                total += read
-            }
-        }
-        return total
     }
 
     fun listChildren(virtualPath: String): List<Map<String, Any>> {
@@ -405,18 +418,21 @@ class SafWorkspace(private val activity: Activity) {
 
     /** Creates a directory (and missing parents) inside a granted tree. */
     fun createDirectory(virtualPath: String): Boolean {
-        resolveOrCreateDirectory(virtualPath)?.let { return true }
-        return false
+        val created = resolveOrCreateDirectory(virtualPath)?.let { true } ?: false
+        if (created) invalidateCache(virtualPath.substringBeforeLast('/', ""))
+        return created
     }
 
     /** Deletes a file or an empty/recursive directory. */
     fun deletePath(virtualPath: String): Boolean {
         val doc = resolve(virtualPath) ?: return false
-        return try {
+        val deleted = try {
             doc.delete()
         } catch (_: Exception) {
             false
         }
+        if (deleted) invalidateCache(virtualPath)
+        return deleted
     }
 
     /** Reads a single SAF file by virtual path. */
@@ -442,7 +458,7 @@ class SafWorkspace(private val activity: Activity) {
         // some providers append a .bin extension.
         val target = existing ?: parent.createFile("text/plain", name) ?: return false
 
-        return try {
+        val written = try {
             context.contentResolver.openOutputStream(target.uri, "wt")?.use {
                 it.write(bytes)
                 it.flush()
@@ -451,6 +467,9 @@ class SafWorkspace(private val activity: Activity) {
         } catch (_: Exception) {
             false
         }
+        // A provider may replace the document on write; drop stale handles.
+        if (written) invalidateCache(virtualPath)
+        return written
     }
 
     private fun resolveOrCreateDirectory(virtualPath: String): DocumentFile? {
