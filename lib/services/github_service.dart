@@ -587,6 +587,40 @@ class GitHubService {
   }
 
   /// Looks up the repository's default branch, falling back to `main`.
+  /// Branch names for a repository, default branch first.
+  ///
+  /// The dialog used to guess the target branch from the repo list, which only
+  /// knows `default_branch`. Picking a repo therefore could not confirm or
+  /// offer any other branch.
+  static Future<List<String>> getBranches({
+    required String token,
+    required String owner,
+    required String repoName,
+  }) async {
+    final client = http.Client();
+    try {
+      final res = await client.get(
+        _repoUri(owner, repoName, '/branches?per_page=100'),
+        headers: _headers(token),
+      ).timeout(_requestTimeout);
+
+      if (res.statusCode != 200) return const [];
+      final data = jsonDecode(res.body);
+      if (data is! List) return const [];
+
+      final names = <String>[];
+      for (final item in data) {
+        final name = (item is Map ? item['name'] : null) as String?;
+        if (name != null && name.isNotEmpty) names.add(name);
+      }
+      return names;
+    } catch (_) {
+      return const [];
+    } finally {
+      client.close();
+    }
+  }
+
   static Future<String> getDefaultBranch({
     required String token,
     required String owner,

@@ -68,7 +68,9 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
         _username = user;
         _selectedRepo = savedRepo;
       });
-      _fetchRepos(token, preferredRepo: savedRepo);
+      // _fetchRepos loads the branch list for whatever selection it resolves,
+      // so the target branch is known as soon as the dialog opens.
+      await _fetchRepos(token, preferredRepo: savedRepo);
     }
   }
 
@@ -84,6 +86,74 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
 
   /// True once the user picked a repository by hand. Nothing may override it.
   bool _repoPickedByUser = false;
+
+  /// Branch names known for the selected repository, default branch first.
+  List<String> _branches = const [];
+
+  /// True once the user picked or typed a branch by hand.
+  bool _branchPickedByUser = false;
+
+  /// True while [_loadBranches] is running.
+  bool _isLoadingBranches = false;
+
+  /// Bumped whenever the selection changes: DropdownButton
+  /// keeps its own FormFieldState and ignores a changed `value` after the first
+  /// build, so the key forces a fresh widget that displays the real selection.
+  int _dropdownEpoch = 0;
+
+  /// Loads the branch list for [repo] and selects its default.
+  Future<void> _loadBranches(String repo, {required String owner, required String token}) async {
+    final requestKey = repo.toLowerCase();
+    setState(() {
+      _isLoadingBranches = true;
+      _branches = const [];
+    });
+
+    final branches = await GitHubService.getBranches(
+      token: token,
+      owner: owner,
+      repoName: repo,
+    );
+
+    if (!mounted) return;
+    // Ignore a response for a repository that is no longer selected.
+    if ((_selectedRepo ?? '').toLowerCase() != requestKey) return;
+
+    final defaultBranch = await GitHubService.getDefaultBranch(
+      token: token,
+      owner: owner,
+      repoName: repo,
+    );
+    if (!mounted) return;
+    if ((_selectedRepo ?? '').toLowerCase() != requestKey) return;
+
+    final ordered = <String>[];
+    if (branches.isNotEmpty) {
+      if (branches.any((b) => b == defaultBranch)) ordered.add(defaultBranch);
+      for (final b in branches) {
+        if (!ordered.contains(b)) ordered.add(b);
+      }
+    } else {
+      ordered.add(defaultBranch);
+    }
+
+    setState(() {
+      _branches = ordered;
+      _isLoadingBranches = false;
+      _selectedRepoDefaultBranch = defaultBranch;
+      // Preselect the repo default so the target is always explicit, unless
+      // the user already chose a branch for this repository.
+      if (!_branchPickedByUser || _branchController.text.trim().isEmpty) {
+        _branchController.text = defaultBranch;
+      }
+      _dropdownEpoch++;
+    });
+
+    widget.onLog(
+      'Repository "$repo" selected — target branch "${_branchController.text}".',
+      LogLevel.info,
+    );
+  }
 
   /// Names available in the dropdown: the fetched list plus the selection
   /// itself, so a repo that is missing from a stale list is still selectable.
@@ -118,7 +188,12 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
   String get _pushDestinationLabel {
     final target = _pushDestination;
     if (target.isEmpty) return 'Choose a repository';
-    return 'Push to $target';
+    final branch = _branchController.text.trim();
+    // Show the branch on the button as well: it is the other half of the
+    // destination and used to be invisible until the push had started.
+    return branch.isEmpty || branch == 'main'
+        ? 'Push to $target'
+        : 'Push to $target → $branch';
   }
 
   Widget _destinationBanner() {
@@ -145,7 +220,8 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
             child: Text(
               ready
                   ? 'Pushing to $_username/$target'
-                      '${_isCreateNew ? ' (will be created)' : ''}'
+                      '${_isCreateNew ? ' (will be created)' : ''}\n'
+                      'Branch: ${_branchController.text.trim().isEmpty ? 'main' : _branchController.text.trim()}'
                   : 'Pick a repository — nothing will be pushed without one.',
               style: TextStyle(
                 color: ready ? const Color(0xFFA7F3D0) : const Color(0xFFFCA5A5),
@@ -247,6 +323,11 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
         LogLevel.warning,
       );
     }
+
+    // The resolved repository's branches may differ from anything guessed.
+    if (resolved != null && resolved.isNotEmpty && (_username ?? '').isNotEmpty) {
+      await _loadBranches(resolved, owner: _username!, token: token);
+    }
   }
 
   Future<void> _handlePasteToken() async {
@@ -346,13 +427,6 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       setState(() => _selectedRepo = target);
     }
 
-    // Say it once, loudly, before a single byte is uploaded.
-    widget.onLog(
-      'Pushing to repository: $target'
-      '${_isCreateNew ? ' (new)' : ''}',
-      LogLevel.info,
-    );
-
     // Pre-flight the workspace: pushing to a folder Android will not let us
     // read used to fail with a bare "No files found to push to GitHub".
     final probe = await WorkspaceProbe.scanForPush(widget.workingDir, maxFiles: 200);
@@ -386,7 +460,16 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
       return;
     }
 
-    final branch = _branchController.text.trim().isEmpty ? 'main' : _branchController.text.trim();
+    final branchText = _branchController.text.trim();
+    final branch = branchText.isEmpty
+        ? (_selectedRepoDefaultBranch.isEmpty ? 'main' : _selectedRepoDefaultBranch)
+        : branchText;
+
+    // State the full destination once, before anything is uploaded.
+    widget.onLog(
+      'Pushing to repository: $target (branch: $branch)',
+      LogLevel.info,
+    );
     final commitMsg = _commitController.text.trim().isEmpty
         ? 'Update via DevRunner'
         : _commitController.text.trim();
@@ -793,13 +876,16 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
             ),
           if (_isLoadingRepos)
             const Center(child: Padding(padding: EdgeInsets.all(8.0), child: CircularProgressIndicator(strokeWidth: 2)))
-          else
+          else ...[
             DropdownButtonFormField<String>(
-              // DropdownButtonFormField throws if `value` is not one of `items`.
-              // A repo created this session, or one missing from a stale list,
-              // would otherwise crash the dialog. Validate it here and keep the
-              // choice as a pinned extra item so it stays visible AND selected.
+              // The key matters: DropdownButtonFormField owns a FormFieldState
+              // and ignores a changed `value` after its first build, so a new
+              // selection could be stored while the field kept showing the old
+              // repository. Rebuilding the widget on every change is the only
+              // way to guarantee what is shown matches what is selected.
+              key: ValueKey('repo-${_selectedRepo ?? ''}-$_dropdownEpoch'),
               value: _repoNames.contains(_selectedRepo) ? _selectedRepo : null,
+              isExpanded: true,
               hint: Text(
                 _reposError != null
                     ? 'Could not load your repositories — tap Retry'
@@ -821,39 +907,100 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
                 for (final name in _repoNames)
                   DropdownMenuItem<String>(
                     value: name,
-                    child: Text(_repoLabel(name)),
+                    child: Text(_repoLabel(name), overflow: TextOverflow.ellipsis),
                   ),
               ],
               onChanged: (val) async {
                 if (val == null) return;
-                final match = _userRepos.firstWhere(
-                  (r) => r['name'] == val,
-                  orElse: () => const {'default_branch': 'main'},
-                );
-                final branch = (match['default_branch'] as String?) ?? 'main';
+                final token = _savedToken;
+                if (token == null || token.isEmpty) return;
+
                 setState(() {
                   _selectedRepo = val;
                   _repoPickedByUser = true;
-                  _selectedRepoDefaultBranch = branch;
-                  _branchController.text = branch;
+                  // A different repository has its own branches.
+                  _branchPickedByUser = false;
+                  _dropdownEpoch++;
                 });
                 widget.onLog('Target repository set to "$val".', LogLevel.info);
                 await GitHubService.saveRepo(val);
+
+                // Fetch the real branch list so the target branch is correct
+                // and confirmable, instead of guessed from the repo list.
+                await _loadBranches(
+                  val,
+                  owner: _username ?? '',
+                  token: token,
+                );
               },
             ),
+          ],
         ],
         const SizedBox(height: 10),
-        TextField(
-          controller: _branchController,
-          style: const TextStyle(color: Colors.white, fontSize: 12.5, fontFamily: 'monospace'),
-          decoration: InputDecoration(
-            labelText: 'Target Branch (repo default: $_selectedRepoDefaultBranch)',
-            labelStyle: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
-            filled: true,
-            fillColor: const Color(0xFF080C16),
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+        // Branch: a real picker once the repo's branches are known, so the
+        // target is explicit rather than silently "whatever main is".
+        if (_isLoadingBranches)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 6),
+            child: Row(
+              children: [
+                SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2)),
+                SizedBox(width: 8),
+                Text('Loading branches...', style: TextStyle(color: Color(0xFF64748B), fontSize: 11.5)),
+              ],
+            ),
+          )
+        else if (_branches.length > 1 && !_isCreateNew)
+          DropdownButtonFormField<String>(
+            key: ValueKey('branch-${_branchController.text}-$_dropdownEpoch'),
+            value: _branches.contains(_branchController.text) ? _branchController.text : null,
+            isExpanded: true,
+            dropdownColor: const Color(0xFF111827),
+            style: const TextStyle(color: Colors.white, fontSize: 12.5, fontFamily: 'monospace'),
+            decoration: InputDecoration(
+              labelText: 'Target Branch',
+              labelStyle: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
+              filled: true,
+              fillColor: const Color(0xFF080C16),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            items: [
+              for (final name in _branches)
+                DropdownMenuItem<String>(
+                  value: name,
+                  child: Text(
+                    name == _selectedRepoDefaultBranch ? '$name (default)' : name,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+            ],
+            onChanged: (val) {
+              if (val == null) return;
+              setState(() {
+                _branchController.text = val;
+                _branchPickedByUser = true;
+              });
+              widget.onLog('Target branch set to "$val".', LogLevel.info);
+            },
+          )
+        else
+          TextField(
+            controller: _branchController,
+            // Typing a branch counts as choosing one.
+            onChanged: (_) {
+              if (!_branchPickedByUser) {
+                setState(() => _branchPickedByUser = true);
+              }
+            },
+            style: const TextStyle(color: Colors.white, fontSize: 12.5, fontFamily: 'monospace'),
+            decoration: InputDecoration(
+              labelText: 'Target Branch (repo default: $_selectedRepoDefaultBranch)',
+              labelStyle: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
+              filled: true,
+              fillColor: const Color(0xFF080C16),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+            ),
           ),
-        ),
         const SizedBox(height: 10),
         // The destination, spelled out. If this ever disagrees with the
         // dropdown, the push is blocked rather than guessing.
