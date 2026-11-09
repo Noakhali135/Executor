@@ -197,6 +197,22 @@ class WorkspaceProbe {
   /// No permission check is involved: a persisted `OPEN_DOCUMENT_TREE` grant
   /// is full read/write access to that folder for as long as the user keeps it.
   static Future<WorkspaceScan> scanSaf(String root, {int maxFiles = 5000}) async {
+    // If the folder cannot even be described, the grant was revoked or the
+    // folder was deleted. Fail fast instead of walking a dead tree.
+    if (root != SafWorkspace.virtualRoot) {
+      final rootInfo = await SafWorkspace.describe(root);
+      if (rootInfo == null) {
+        return const WorkspaceScan(
+          files: [],
+          directoryCount: 0,
+          unreadableEntries: 1,
+          skippedIgnored: 0,
+          errors: ['The granted folder is no longer accessible. Pick it again.'],
+          viaSaf: true,
+        );
+      }
+    }
+
     final rows = await SafWorkspace.listFiles(root, maxFiles: maxFiles);
     final files = <WorkspaceFile>[];
     var skippedIgnored = 0;

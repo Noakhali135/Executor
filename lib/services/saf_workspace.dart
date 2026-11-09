@@ -97,6 +97,48 @@ class SafWorkspace {
     } catch (_) {}
   }
 
+  /// Scan/hash progress events from the native side.
+  ///
+  /// `{type: scan, scanned, dirs}` while a tree is walked and
+  /// `{type: hash, done, total}` while blob ids are computed.
+  static Stream<Map<String, Object?>> get progress => _progress.receiveBroadcastStream()
+      .map((event) => Map<String, Object?>.from(event as Map));
+
+  static const EventChannel _progress = EventChannel('devrunner/saf_progress');
+
+  /// Asks the native side to stop the current long operation.
+  static Future<void> cancel() async {
+    try {
+      await _channel.invokeMethod('cancelSafOp');
+    } catch (_) {}
+  }
+
+  /// Git blob SHA-1 for [paths], computed natively without moving the bytes.
+  ///
+  /// Returns `{path: sha}`; a null sha means the file could not be read.
+  static Future<Map<String, String?>> hashFiles(List<String> paths) async {
+    if (paths.isEmpty) return const {};
+    final out = <String, String?>{};
+    // Chunked so one huge list never becomes one huge channel message.
+    const chunkSize = 200;
+    for (var i = 0; i < paths.length; i += chunkSize) {
+      final chunk = paths.sublist(i, (i + chunkSize).clamp(0, paths.length));
+      try {
+        final rows = await _channel.invokeListMethod<Map<Object?, Object?>>(
+          'hashSafFiles',
+          {'paths': chunk},
+        );
+        for (final row in rows ?? const <Map<Object?, Object?>>[]) {
+          final path = row['path'] as String?;
+          if (path != null) out[path] = row['sha'] as String?;
+        }
+      } catch (_) {
+        // Leave these unresolved; the caller treats a missing sha as changed.
+      }
+    }
+    return out;
+  }
+
   /// Lists every file below [path] (recursively; SAF trees are expanded natively).
   static Future<List<Map<String, Object?>>> listFiles(
     String path, {

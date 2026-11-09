@@ -30,6 +30,15 @@ import io.flutter.plugin.common.MethodChannel
 class SafWorkspace(private val activity: Activity) {
 
     companion object {
+        /**
+         * Directories that are never worth pushing. Matches
+         * `kIgnoredDirectoryNames` in `workspace_probe.dart`.
+         */
+        private val IGNORED_DIRS = setOf(
+            ".git", ".dart_tool", "build", "node_modules", ".gradle", ".idea",
+            ".vscode", "__pycache__", ".venv", "venv", "Pods", ".next", ".cache"
+        )
+
         const val VIRTUAL_ROOT = "/devrunner-saf"
         private const val REQUEST_OPEN_TREE = 0x5AF1
         private const val PREFS = "devrunner_saf"
@@ -117,6 +126,17 @@ class SafWorkspace(private val activity: Activity) {
         }
     }
 
+    @Volatile
+    private var cancelled = false
+
+    fun resetCancellation() {
+        cancelled = false
+    }
+
+    fun cancel() {
+        cancelled = true
+    }
+
     fun listTrees(): List<Map<String, Any>> =
         knownTrees().mapNotNull { (treeId, uri) ->
             val file = DocumentFile.fromTreeUri(context, uri) ?: return@mapNotNull null
@@ -199,21 +219,41 @@ class SafWorkspace(private val activity: Activity) {
      *
      * Returned `path` values are virtual, so the Dart side sees ordinary paths.
      */
-    fun listTree(virtualPath: String, maxFiles: Int): List<Map<String, Any>> {
+    /**
+     * Every file below [virtualPath].
+     *
+     * Two things keep a real Flutter project from killing the app: directories
+     * that are never pushable (`build`, `.dart_tool`, `.git`, ...) are skipped
+     * before they are opened, and [onProgress] reports a heartbeat so the UI can
+     * show that work is happening. [cancelled] is checked per directory so a
+     * cancelled scan finishes promptly instead of walking everything.
+     */
+    fun listTree(
+        virtualPath: String,
+        maxFiles: Int,
+        onProgress: (scanned: Int, dirs: Int) -> Unit = { _, _ -> }
+    ): List<Map<String, Any>> {
         val out = ArrayList<Map<String, Any>>()
         val root = resolve(virtualPath) ?: return out
+        var dirs = 0
 
         fun walk(dir: DocumentFile, prefix: String, depth: Int) {
-            if (out.size >= maxFiles || depth > 32) return
+            if (out.size >= maxFiles || depth > 32 || cancelled) return
+            dirs++
+            // One callback per directory, not per file: cheap to marshal.
+            if (dirs % 25 == 0) onProgress(out.size, dirs)
+
             val children = try {
                 dir.listFiles()
             } catch (_: Exception) {
                 return
             }
             for (child in children) {
-                if (out.size >= maxFiles) return
-                val path = if (prefix.isEmpty()) "${virtualPath}/${child.name}" else "$prefix/${child.name}"
+                if (out.size >= maxFiles || cancelled) return
+                val name = child.name ?: continue
+                val path = if (prefix.isEmpty()) "${virtualPath}/${name}" else "$prefix/${name}"
                 if (child.isDirectory) {
+                    if (name in IGNORED_DIRS) continue
                     walk(child, path, depth + 1)
                 } else {
                     out.add(
@@ -228,10 +268,111 @@ class SafWorkspace(private val activity: Activity) {
         }
 
         if (root.isDirectory) walk(root, "", 0)
+        onProgress(out.size, dirs)
         return out
     }
 
-    /** Direct children only, for the explorer tree. */
+    /**
+     * Git blob SHA-1 for each path, computed natively.
+     *
+     * Hashing used to pull every file's bytes across the platform channel only
+     * to throw them away, which dominated both time and peak memory on a real
+     * project. Streaming through MessageDigest here keeps nothing in memory.
+     */
+    fun hashFiles(
+        paths: List<String>,
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }
+    ): List<Map<String, Any>> {
+        val out = ArrayList<Map<String, Any>>(paths.size)
+        for ((index, path) in paths.withIndex()) {
+            if (cancelled) break
+            val file = resolve(path)
+            if (file == null || !file.isFile) {
+                out.add(mapOf("path" to path, "sha" to null))
+                continue
+            }
+            val sha = try {
+                blobSha(file)
+            } catch (_: Exception) {
+                null
+            }
+            out.add(mapOf("path" to path, "sha" to sha))
+            if (index % 20 == 0) onProgress(index + 1, paths.size)
+        }
+        onProgress(out.size, paths.size)
+        return out
+    }
+
+    /**
+     * Git's object id for a file: sha1("blob <len>\u0000" + content).
+     *
+     * Falls back to a buffered stream when the provider does not support
+     * seeking or reporting a length.
+     */
+    private fun blobSha(file: DocumentFile): String? {
+        val uri = file.uri
+        var length = file.length()
+
+        // Some providers report -1 or 0 for a non-empty file. Git hashes the
+        // header with the true length, so measuring it is mandatory: a wrong
+        // header would make the file look changed on every single push.
+        if (length < 0) {
+            length = countBytes(uri) ?: return null
+        }
+
+        val digest = java.security.MessageDigest.getInstance("SHA-1")
+        digest.update("blob $length\u0000".toByteArray(Charsets.UTF_8))
+
+        val opened = context.contentResolver.openInputStream(uri) ?: return null
+        var actual = 0L
+        opened.use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                if (cancelled) return null
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+                actual += read
+            }
+        }
+
+        // If the provider lied about the length, the digest is still valid but
+        // the header is not: hash again with the measured size.
+        if (actual != length) {
+            val retry = java.security.MessageDigest.getInstance("SHA-1")
+            retry.update("blob $actual\u0000".toByteArray(Charsets.UTF_8))
+            val reopened = context.contentResolver.openInputStream(uri) ?: return null
+            reopened.use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    if (cancelled) return null
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    retry.update(buffer, 0, read)
+                }
+            }
+            return retry.digest().joinToString("") { "%02x".format(it) }
+        }
+
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** Streams [uri] once just to measure it, for providers with no length. */
+    private fun countBytes(uri: android.net.Uri): Long? {
+        val input = context.contentResolver.openInputStream(uri) ?: return null
+        var total = 0L
+        input.use { stream ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                if (cancelled) return null
+                val read = stream.read(buffer)
+                if (read <= 0) break
+                total += read
+            }
+        }
+        return total
+    }
+
     fun listChildren(virtualPath: String): List<Map<String, Any>> {
         val out = ArrayList<Map<String, Any>>()
         val dir = resolve(virtualPath) ?: return out

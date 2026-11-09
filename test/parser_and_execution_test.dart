@@ -6,6 +6,7 @@ import 'package:executor/services/export_service.dart';
 import 'package:executor/services/file_execution_service.dart';
 import 'package:executor/services/github_service.dart';
 import 'package:executor/services/saf_workspace.dart';
+import 'package:executor/services/push_progress.dart';
 import 'package:executor/services/workspace_fs.dart';
 import 'package:executor/services/workspace_probe.dart';
 import 'package:executor/services/path_guard.dart';
@@ -390,6 +391,93 @@ void main() {
     test('WorkspaceFs identifies SAF paths without touching the platform', () {
       expect(WorkspaceFs.isSaf(tree), isTrue);
       expect(WorkspaceFs.isSaf('/tmp/plain'), isFalse);
+    });
+  });
+
+  group('Push memory budget', () {
+    test('never lets reserved bytes exceed the capacity', () async {
+      final budget = ByteBudget(100);
+      var peak = 0;
+      var inUse = 0;
+
+      Future<void> job(int size) async {
+        await budget.reserve(size);
+        inUse += size;
+        peak = inUse > peak ? inUse : peak;
+        // Yield so other jobs get a chance to interleave.
+        await Future<void>.delayed(Duration.zero);
+        inUse -= size;
+        budget.release(size);
+      }
+
+      await Future.wait([
+        job(40), job(40), job(40), job(40), job(40),
+      ]);
+
+      // Three 40-byte reservations fit in 100; a fourth must have waited.
+      expect(peak, lessThanOrEqualTo(100));
+      expect(peak, greaterThanOrEqualTo(80));
+    });
+
+    test('a file larger than the budget still gets an exclusive slot', () async {
+      final budget = ByteBudget(100);
+      var peak = 0;
+      var inUse = 0;
+
+      Future<void> job(int size) async {
+        await budget.reserve(size);
+        final held = size > 100 ? 100 : size;
+        inUse += held;
+        peak = inUse > peak ? inUse : peak;
+        await Future<void>.delayed(Duration.zero);
+        inUse -= held;
+        budget.release(size);
+      }
+
+      await Future.wait([job(500), job(10)]);
+
+      // The oversized reservation takes the whole budget and runs alone.
+      expect(peak, lessThanOrEqualTo(100));
+    });
+
+    test('releasing without reserving does not corrupt the counter', () {
+      final budget = ByteBudget(100);
+      budget.release(50);
+      // A stray release must not make the budget look emptier than it is.
+      expect(budget.available, 100);
+    });
+  });
+
+  group('Push progress', () {
+    test('reports indeterminate when the total is unknown', () {
+      const progress = PushProgress(
+        phase: PushPhase.scanning,
+        message: 'Scanning...',
+      );
+      expect(progress.fraction, isNull);
+      expect(progress.isRunning, isTrue);
+      expect(progress.label, 'Scanning workspace');
+    });
+
+    test('clamps the fraction between 0 and 1', () {
+      const progress = PushProgress(
+        phase: PushPhase.uploading,
+        done: 250,
+        total: 100,
+      );
+      expect(progress.fraction, 1.0);
+    });
+
+    test('terminal phases are not running', () {
+      for (final phase in [
+        PushPhase.done,
+        PushPhase.failed,
+        PushPhase.cancelled,
+        PushPhase.idle,
+      ]) {
+        expect(PushProgress(phase: phase).isRunning, isFalse,
+            reason: '$phase should not be running');
+      }
     });
   });
 }

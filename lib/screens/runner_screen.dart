@@ -6,6 +6,7 @@ import '../services/file_execution_service.dart';
 import '../services/saf_workspace.dart';
 import '../services/storage_service.dart';
 import '../services/workspace_probe.dart';
+import '../widgets/push_progress_panel.dart';
 import '../widgets/workspace_picker_sheet.dart';
 import '../widgets/github_sync_dialog.dart';
 
@@ -539,6 +540,9 @@ class _RunnerScreenState extends State<RunnerScreen> {
         children: [
           _buildWorkingDirectoryCard(),
           const SizedBox(height: 8),
+          // Live push status: a large project takes minutes and must never
+          // look frozen. Placed above the terminal so it stays visible.
+          const PushProgressPanel(compact: true),
           _buildPendingLoadBanner(),
           _buildEditorCard(),
           const SizedBox(height: 8),

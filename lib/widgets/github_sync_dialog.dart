@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/command_action.dart';
 import '../services/github_service.dart';
+import '../services/push_progress.dart';
 import '../services/workspace_probe.dart';
 
 class GitHubSyncDialog extends StatefulWidget {
@@ -328,21 +329,50 @@ class _GitHubSyncDialogState extends State<GitHubSyncDialog> {
     // this dialog's own context would already be deactivated by then.
     final navigatorContext = Navigator.of(context, rootNavigator: true).context;
 
+    // Drive the shared progress reporter; the Runner renders it, so status
+    // stays visible after this dialog closes.
+    PushProgressReporter.begin('Preparing push...');
+
     if (mounted) Navigator.pop(context);
 
     // The dialog is gone but the callback still targets the Runner's log list,
     // which owns its own mounted checks.
-    await GitHubService.pushWorkspace(
-      token: _savedToken!,
-      owner: _username!,
-      repoName: targetRepo,
-      branch: branch,
-      commitMessage: commitMsg,
-      workingDir: widget.workingDir,
-      specificPaths: _pushSelectedOnly ? widget.selectedExplorerPaths : null,
-      onLog: widget.onLog,
-      onReauth: (error) => _promptForNewToken(navigatorContext, error),
-    );
+    try {
+      await GitHubService.pushWorkspace(
+        token: _savedToken!,
+        owner: _username!,
+        repoName: targetRepo,
+        branch: branch,
+        commitMessage: commitMsg,
+        workingDir: widget.workingDir,
+        specificPaths: _pushSelectedOnly ? widget.selectedExplorerPaths : null,
+        onLog: widget.onLog,
+        onReauth: (error) => _promptForNewToken(navigatorContext, error),
+      );
+
+      // pushWorkspace owns the terminal phase: it knows whether it actually
+      // committed. Only guard against a phase left hanging.
+      final last = PushProgressReporter.current.value;
+      if (last.isRunning) {
+        PushProgressReporter.finish(
+          PushPhase.failed,
+          'Push ended without confirming a commit. Check the log above.',
+        );
+      }
+    } catch (e) {
+      // Never rethrow: this runs after the dialog is popped, so an unhandled
+      // async error here would surface as an uncaught exception far from the
+      // cause.
+      PushProgressReporter.finish(PushPhase.failed, '$e');
+    } finally {
+      // Clear a successful result after a while so the panel does not sit on
+      // screen forever. Failures stay put: the user needs to read them.
+      Future.delayed(const Duration(seconds: 20), () {
+        if (PushProgressReporter.current.value.phase == PushPhase.done) {
+          PushProgressReporter.reset();
+        }
+      });
+    }
   }
 
   /// Shown from the Runner's log when a push fails on auth: lets the user

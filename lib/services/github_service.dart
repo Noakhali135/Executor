@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/command_action.dart';
 import 'saf_workspace.dart';
 import 'secure_store.dart';
+import 'push_progress.dart';
 import 'workspace_probe.dart';
 
 class TokenVerifyResult {
@@ -668,6 +669,9 @@ class GitHubService {
     }
   }
 
+  /// True once the user asked to abort the current push.
+  static bool get cancelRequested => PushProgressReporter.cancelRequested;
+
   static Future<void> _runSlidingPool<T>({
     required List<T> items,
     required int concurrency,
@@ -765,6 +769,20 @@ class GitHubService {
         onLog('[AUTH] ${e.message}', LogLevel.error);
         onLog('[HOW TO FIX] ${e.remedy}', LogLevel.warning);
         onLog('Push aborted. No commit was created.', LogLevel.warning);
+        PushProgressReporter.finish(
+          PushPhase.failed,
+          e.message,
+        );
+        return;
+      } on PushCancelled {
+        onLog(
+          '[CANCELLED] Stopped on request. No commit was created; the branch is unchanged.',
+          LogLevel.warning,
+        );
+        PushProgressReporter.finish(
+          PushPhase.cancelled,
+          'Cancelled. No commit was created.',
+        );
         return;
       } on _PushConflict catch (e) {
         if (attempt == 0) {
@@ -772,6 +790,7 @@ class GitHubService {
           continue;
         }
         onLog('Push aborted: ${e.message}', LogLevel.error);
+        PushProgressReporter.finish(PushPhase.failed, e.message);
         return;
       }
     }
@@ -884,8 +903,10 @@ class GitHubService {
       int unchangedCount = 0;
       int skippedTooLarge = 0;
 
-      for (int i = 0; i < files.length; i++) {
-        final file = files[i];
+      // Drop oversized files up front so the hashing pass never touches them.
+      final candidates = <WorkspaceFile>[];
+      final relPaths = <String, String>{};
+      for (final file in files) {
         final relPath = SafWorkspace.isSafPath(file.path)
             ? file.path.substring(workingDir.length + 1)
             : p.relative(file.path, from: workingDir).replaceAll(r'\', '/');
@@ -899,12 +920,55 @@ class GitHubService {
           skippedTooLarge++;
           continue;
         }
-
-        final localSha = await _calculateGitBlobShaStreaming(file);
         totalScannedBytes += length;
+        relPaths[file.path] = relPath;
+        candidates.add(file);
+      }
+
+      onLog(
+        'Hashing ${candidates.length} file(s) (${_formatBytes(totalScannedBytes)})...',
+        LogLevel.info,
+      );
+
+      // Hash SAF files natively: pulling every byte into Dart just to throw it
+      // away was the main memory spike on a large project.
+      final safPaths = candidates
+          .where((f) => SafWorkspace.isSafPath(f.path))
+          .map((f) => f.path)
+          .toList();
+      PushProgressReporter.report(
+        PushPhase.hashing,
+        done: 0,
+        total: candidates.length,
+        message: 'Hashing ${candidates.length} file(s)...',
+      );
+      final nativeShas = await SafWorkspace.hashFiles(safPaths);
+
+      if (cancelRequested) throw const PushCancelled();
+
+      // Hashing natively can come back empty if the walk was interrupted; say
+      // so once instead of logging a warning per file.
+      if (safPaths.isNotEmpty && nativeShas.isEmpty) {
+        onLog(
+          '[WARN] Could not compare against GitHub; every file will be uploaded.',
+          LogLevel.warning,
+        );
+      }
+
+      final remoteBefore = existingRemoteBlobs.length;
+      for (int i = 0; i < candidates.length; i++) {
+        final file = candidates[i];
+        final relPath = relPaths[file.path]!;
+
+        final localSha = SafWorkspace.isSafPath(file.path)
+            ? nativeShas[file.path]
+            : await _calculateGitBlobShaStreaming(file);
+
+        // An unreadable file is treated as changed: the upload attempt then
+        // surfaces a real error instead of reporting "up to date" wrongly.
 
         final remoteSha = existingRemoteBlobs[relPath];
-        if (remoteSha == localSha) {
+        if (localSha != null && remoteSha == localSha) {
           unchangedCount++;
           treeNodes.add({
             'path': relPath,
@@ -918,11 +982,32 @@ class GitHubService {
           } else {
             modifiedCount++;
           }
-          totalUploadBytes += length;
+          totalUploadBytes += await file.length();
           filesToUpload.add(_PendingUpload(file: file, relPath: relPath));
         }
+        if (localSha == null && !SafWorkspace.isSafPath(file.path)) {
+          onLog('Could not hash ${file.name}; uploading it to be safe.', LogLevel.warning);
+        }
 
-        if (i % 25 == 0) await Future.delayed(Duration.zero);
+        if (cancelRequested) throw const PushCancelled();
+
+        if (i % 25 == 0) {
+          await Future.delayed(Duration.zero);
+          // The bar moves every 100 files; the log every 500 so it stays readable.
+          PushProgressReporter.report(
+            PushPhase.hashing,
+            done: i,
+            total: candidates.length,
+            message: 'Compared $i of ${candidates.length} file(s) with GitHub',
+          );
+          if (i > 0 && i % 500 == 0) {
+            onLog('Hashed $i/${candidates.length} file(s)...', LogLevel.info);
+          }
+        }
+      }
+
+      if (remoteBefore == 0 && candidates.isNotEmpty) {
+        onLog('Remote repository is empty; this will be the first commit.', LogLevel.info);
       }
 
       final summaryDiff = [
@@ -944,31 +1029,62 @@ class GitHubService {
           '[SUCCESS] Everything is up-to-date! All $unchangedCount file(s) already match GitHub.',
           LogLevel.success,
         );
+        PushProgressReporter.finish(
+          PushPhase.done,
+          'Already up to date - nothing to upload.',
+        );
         return;
       }
 
-      onLog('Streaming ${filesToUpload.length} file(s) across 16 parallel workers...', LogLevel.info);
+      // 16 workers meant 16 files resident at once *and* their base64 copies
+      // (~2.3x the bytes each). Six keeps the heap flat and is still fast.
+      const uploadConcurrency = 6;
+      onLog(
+        'Uploading ${filesToUpload.length} file(s) '
+        '(${_formatBytes(totalUploadBytes)}) with $uploadConcurrency parallel workers...',
+        LogLevel.info,
+      );
       int uploadedBytesCounter = 0;
       final failedFiles = <String>[];
       int processedCounter = 0;
       GitHubAuthException? authFailure;
 
+      PushProgressReporter.report(
+        PushPhase.uploading,
+        done: 0,
+        total: filesToUpload.length,
+        message: 'Uploading ${filesToUpload.length} file(s)...',
+      );
+
+      // Bound the *encoded* cost, not the raw size: an upload holds the file,
+      // a base64 string (~1.37x) and the JSON request body (~1.37x again), so
+      // charge ~3x and cap the total. Peak heap stays around 30 MB no matter
+      // how big the project is.
+      const encodedCostFactor = 3;
+      final budget = ByteBudget(30 * 1024 * 1024);
+
       await _runSlidingPool<_PendingUpload>(
         items: filesToUpload,
-        concurrency: 16,
+        concurrency: uploadConcurrency,
         worker: (item) async {
           // Once auth fails, stop burning through the remaining files: the
           // 401s would all be identical and the real problem is one token.
-          if (authFailure != null) return;
+          if (authFailure != null || cancelRequested) return;
+          int reserved = 0;
           try {
-            // Read only inside the worker so peak memory stays bounded even
-            // for large batches.
-            final bytes = await item.file.readAsBytes();
-
-            if (bytes.length > maxBlobBytes) {
+            // Reserve before reading so concurrency and file size cannot
+            // combine into an out-of-memory kill.
+            final length = await item.file.length();
+            if (length > maxBlobBytes) {
               failedFiles.add(item.relPath);
               return;
             }
+            reserved = (length > 0 ? length : 1) * encodedCostFactor;
+            await budget.reserve(reserved);
+
+            if (cancelRequested) return;
+
+            final bytes = await item.file.readAsBytes();
 
             final blobRes = await client.post(
               _repoUri(owner, repoName, '/git/blobs'),
@@ -1013,17 +1129,32 @@ class GitHubService {
               onLog('Blob upload error for ${item.relPath}: $e', LogLevel.error);
             }
           } finally {
+            if (reserved > 0) budget.release(reserved);
             processedCounter++;
-            if (processedCounter % 15 == 0 || processedCounter == filesToUpload.length) {
+            // Report progress on *every* file so the bar always moves; only
+            // log every so often so the terminal stays readable.
+            PushProgressReporter.report(
+              PushPhase.uploading,
+              done: processedCounter,
+              total: filesToUpload.length,
+              message:
+                  '${_formatBytes(uploadedBytesCounter)} of ${_formatBytes(totalUploadBytes)} uploaded',
+            );
+            if (processedCounter % 25 == 0 ||
+                processedCounter == filesToUpload.length) {
               onLog(
-                'Processed $processedCounter/${filesToUpload.length} files '
-                '(${_formatBytes(uploadedBytesCounter)} / ${_formatBytes(totalUploadBytes)})...',
+                'Uploaded $processedCounter/${filesToUpload.length} files '
+                '(${_formatBytes(uploadedBytesCounter)} / ${_formatBytes(totalUploadBytes)})',
                 LogLevel.info,
               );
             }
           }
         },
       );
+
+      if (cancelRequested) {
+        throw const PushCancelled();
+      }
 
       if (authFailure != null) {
         // Abort before the commit: nothing is written to the branch.
@@ -1040,9 +1171,17 @@ class GitHubService {
           'the branch is unchanged. First failures: ${failedFiles.take(5).join(', ')}',
           LogLevel.error,
         );
+        PushProgressReporter.finish(
+          PushPhase.failed,
+          '${failedFiles.length} file(s) failed to upload. Nothing was committed.',
+        );
         return;
       }
 
+      PushProgressReporter.report(
+        PushPhase.committing,
+        message: 'All files uploaded. Creating the commit...',
+      );
       onLog('Generating Git Tree with ${treeNodes.length} objects...', LogLevel.info);
       final treePayload = <String, dynamic>{'tree': treeNodes};
       if (baseTreeSha != null) treePayload['base_tree'] = baseTreeSha;
@@ -1058,6 +1197,10 @@ class GitHubService {
       }
       if (treeRes.statusCode != 201) {
         onLog('Failed to create Git Tree: ${_extractMessage(treeRes)}', LogLevel.error);
+        PushProgressReporter.finish(
+          PushPhase.failed,
+          'GitHub rejected the tree. Nothing was committed.',
+        );
         return;
       }
       final newTreeSha = jsonDecode(treeRes.body)['sha'];
@@ -1080,6 +1223,10 @@ class GitHubService {
       }
       if (commitRes.statusCode != 201) {
         onLog('Failed to create commit: ${_extractMessage(commitRes)}', LogLevel.error);
+        PushProgressReporter.finish(
+          PushPhase.failed,
+          'GitHub rejected the commit. The branch is unchanged.',
+        );
         return;
       }
       final newCommitSha = jsonDecode(commitRes.body)['sha'] as String;
@@ -1117,10 +1264,18 @@ class GitHubService {
             LogLevel.success,
           );
           onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogLevel.success);
+          PushProgressReporter.finish(
+            PushPhase.done,
+            'Pushed $shortSha: $newCount new, $modifiedCount modified.',
+          );
         } else if (updateRefRes.statusCode == 409 || updateRefRes.statusCode == 422) {
           throw _PushConflict('Branch "$branch" was updated remotely while pushing.');
         } else {
           onLog('Failed to update branch reference: ${_extractMessage(updateRefRes)}', LogLevel.error);
+          PushProgressReporter.finish(
+            PushPhase.failed,
+            'Could not move the branch. Nothing was committed.',
+          );
         }
       } else {
         final createRefRes = await client.post(
@@ -1137,10 +1292,21 @@ class GitHubService {
             LogLevel.success,
           );
           onLog('Repository URL: https://github.com/$owner/$repoName/tree/$branch', LogLevel.success);
+          PushProgressReporter.finish(
+            PushPhase.done,
+            'Created branch "$branch" at $shortSha.',
+          );
         } else {
           onLog('Failed to create branch reference: ${_extractMessage(createRefRes)}', LogLevel.error);
+          PushProgressReporter.finish(
+            PushPhase.failed,
+            'Could not create the branch. Nothing was committed.',
+          );
         }
       }
+    } on PushCancelled {
+      // Nothing has been committed yet: the branch is untouched.
+      rethrow;
     } on _PushConflict {
       // Handled by the retry wrapper.
       rethrow;
@@ -1150,12 +1316,15 @@ class GitHubService {
       rethrow;
     } on TimeoutException {
       onLog('Request timed out. The network is slow or GitHub is unreachable.', LogLevel.error);
+      PushProgressReporter.finish(PushPhase.failed, 'Network timeout. The branch is unchanged.');
     } on SocketException {
       onLog('Network error: unable to reach GitHub. Check the device connection.', LogLevel.error);
+      PushProgressReporter.finish(PushPhase.failed, 'Network error. The branch is unchanged.');
     } on FormatException {
       onLog('Unexpected response from GitHub (malformed JSON).', LogLevel.error);
     } catch (e) {
       onLog('Unexpected error during GitHub push: $e', LogLevel.error);
+      PushProgressReporter.finish(PushPhase.failed, 'Unexpected error. The branch is unchanged.');
     } finally {
       client.close();
     }
@@ -1211,9 +1380,21 @@ class GitHubService {
     Set<String>? specificPaths,
     required Function(String message, LogLevel level) onLog,
   }) async {
+    PushProgressReporter.report(
+      PushPhase.scanning,
+      message: 'Scanning the workspace (this is the slow part for big projects)...',
+    );
+
     final scan = specificPaths != null && specificPaths.isNotEmpty
         ? await WorkspaceProbe.scan(workingDir, maxFiles: 5000, specificPaths: specificPaths)
         : await WorkspaceProbe.scanForPush(workingDir, maxFiles: 5000);
+
+    PushProgressReporter.report(
+      PushPhase.scanning,
+      done: scan.files.length,
+      total: scan.files.length,
+      message: 'Found ${scan.files.length} file(s) in ${scan.directoryCount} folder(s)',
+    );
 
     onLog(
       'Scanned ${scan.directoryCount} folder(s) and found ${scan.files.length} file(s)'

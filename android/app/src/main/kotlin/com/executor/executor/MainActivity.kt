@@ -1,10 +1,14 @@
 package com.executor.executor
 
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
-import java.io.File
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * Single FlutterActivity.
@@ -25,9 +29,60 @@ class MainActivity : FlutterActivity() {
 
     private lateinit var saf: SafWorkspace
 
+    /**
+     * SAF work runs here, never on the UI thread.
+     *
+     * Walking a real project means thousands of DocumentFile calls, each a
+     * ContentProvider round trip. On the main thread that tripped Android's
+     * "app not responding" watchdog and the process was killed mid-push.
+     */
+    private val worker: ExecutorService = Executors.newSingleThreadExecutor()
+    private val main = Handler(Looper.getMainLooper())
+
+    private var progressSink: EventChannel.EventSink? = null
+
+    /** Throttled scan progress; the UI needs a heartbeat, not every file. */
+    private fun emitProgress(scanned: Int, dirs: Int) {
+        main.post {
+            progressSink?.success(mapOf("type" to "scan", "scanned" to scanned, "dirs" to dirs))
+        }
+    }
+
+    private fun emitHashProgress(done: Int, total: Int) {
+        main.post {
+            progressSink?.success(mapOf("type" to "hash", "done" to done, "total" to total))
+        }
+    }
+
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
         saf = SafWorkspace(this)
+    }
+
+    override fun onDestroy() {
+        worker.shutdownNow()
+        super.onDestroy()
+    }
+
+    /**
+     * Runs [work] on the worker thread and reports back on the UI thread.
+     *
+     * `MethodChannel.Result` may only be touched on the main thread, hence the
+     * post back. Any cancellation request is cleared first so one cancelled
+     * operation cannot poison the next one.
+     */
+    private fun runAsync(result: MethodChannel.Result, work: () -> Any?) {
+        saf.resetCancellation()
+        worker.execute {
+            try {
+                val value = work()
+                main.post { result.success(value) }
+            } catch (e: SecurityException) {
+                main.post { result.error("permission_denied", e.message ?: "Permission denied", null) }
+            } catch (e: Exception) {
+                main.post { result.error("failure", e.message ?: e.toString(), null) }
+            }
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -39,26 +94,29 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
+        EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "devrunner/saf_progress"
+        ).setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                progressSink = events
+            }
+
+            override fun onCancel(arguments: Any?) {
+                progressSink = null
+            }
+        })
+
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             channelName
         ).setMethodCallHandler { call, result ->
             try {
                 when (call.method) {
-                    "isWithinRoot" -> {
-                        val root = call.argument<String>("root")
-                        val target = call.argument<String>("target")
-                        if (root == null || target == null) {
-                            result.error("bad_args", "root and target are required", null)
-                        } else {
-                            result.success(isWithinRoot(root, target))
-                        }
-                    }
-
                     // ---- Storage Access Framework -----------------------
                     "pickDirectory" -> saf.pickDirectory(result)
 
-                    "listGrantedTrees" -> result.success(saf.listTrees())
+                    "listGrantedTrees" -> runAsync(result) { saf.listTrees() }
 
                     "forgetTree" -> {
                         val treeId = call.argument<String>("treeId")
@@ -76,8 +134,30 @@ class MainActivity : FlutterActivity() {
                         if (path == null) {
                             result.error("bad_args", "path is required", null)
                         } else {
-                            result.success(saf.listTree(path, maxFiles))
+                            runAsync(result) {
+                                saf.listTree(path, maxFiles) { scanned, dirs ->
+                                    emitProgress(scanned, dirs)
+                                }
+                            }
                         }
+                    }
+
+                    "hashSafFiles" -> {
+                        val paths = call.argument<List<String>>("paths")
+                        if (paths == null) {
+                            result.error("bad_args", "paths is required", null)
+                        } else {
+                            runAsync(result) {
+                                saf.hashFiles(paths) { done, total ->
+                                    emitHashProgress(done, total)
+                                }
+                            }
+                        }
+                    }
+
+                    "cancelSafOp" -> {
+                        saf.cancel()
+                        result.success(true)
                     }
 
                     "readSafFile" -> {
@@ -85,11 +165,9 @@ class MainActivity : FlutterActivity() {
                         if (path == null) {
                             result.error("bad_args", "path is required", null)
                         } else {
-                            val bytes = saf.readFile(path)
-                            if (bytes == null) {
-                                result.error("not_found", "Could not read $path", null)
-                            } else {
-                                result.success(bytes)
+                            runAsync(result) {
+                                saf.readFile(path)
+                                    ?: throw IllegalStateException("Could not read $path")
                             }
                         }
                     }
@@ -100,7 +178,7 @@ class MainActivity : FlutterActivity() {
                         if (path == null || bytes == null) {
                             result.error("bad_args", "path and bytes are required", null)
                         } else {
-                            result.success(saf.writeFile(path, bytes))
+                            runAsync(result) { saf.writeFile(path, bytes) }
                         }
                     }
 
@@ -109,7 +187,7 @@ class MainActivity : FlutterActivity() {
                         if (path == null) {
                             result.error("bad_args", "path is required", null)
                         } else {
-                            result.success(saf.listChildren(path))
+                            runAsync(result) { saf.listChildren(path) }
                         }
                     }
 
@@ -118,7 +196,7 @@ class MainActivity : FlutterActivity() {
                         if (path == null) {
                             result.error("bad_args", "path is required", null)
                         } else {
-                            result.success(saf.createDirectory(path))
+                            runAsync(result) { saf.createDirectory(path) }
                         }
                     }
 
@@ -127,7 +205,7 @@ class MainActivity : FlutterActivity() {
                         if (path == null) {
                             result.error("bad_args", "path is required", null)
                         } else {
-                            result.success(saf.deletePath(path))
+                            runAsync(result) { saf.deletePath(path) }
                         }
                     }
 
@@ -136,7 +214,7 @@ class MainActivity : FlutterActivity() {
                         if (path == null) {
                             result.error("bad_args", "path is required", null)
                         } else {
-                            result.success(saf.describe(path))
+                            runAsync(result) { saf.describe(path) }
                         }
                     }
 
@@ -147,17 +225,6 @@ class MainActivity : FlutterActivity() {
             } catch (e: Exception) {
                 result.error("failure", e.message ?: e.toString(), null)
             }
-        }
-    }
-
-    /** True when [target] is a strict descendant of [root] after canonicalising. */
-    private fun isWithinRoot(root: String, target: String): Boolean {
-        return try {
-            val rootFile = File(root).canonicalFile
-            val targetFile = File(target).canonicalFile
-            targetFile.path.startsWith(rootFile.path + File.separator)
-        } catch (_: Exception) {
-            false
         }
     }
 }
